@@ -161,6 +161,14 @@ _ATTACHMENT_BODY = "hand"
 # module docstring, point 7).
 _CAMERA_EULER = f"{math.pi} 0 0"
 _HOME_KEYFRAME = "home"
+# Conveyor object box half-extent (m) -- also the geometric source of the
+# ~0.02m systematic +Z bias in the wrist camera's segmentation centroid (the
+# centroid lands on the box's visible top face, `OBJECT_HALF_HEIGHT_M` above
+# its volumetric center, not on the center itself). Exposed here so
+# perception/run-loop code can correct for it using the same known value
+# used to build the object's geometry, instead of a second hardcoded copy of
+# "0.02". See design spec Section 12 for the full accuracy-bias writeup.
+OBJECT_HALF_HEIGHT_M = 0.02
 # Task 13: arm-only resting configuration that cuts the required descent to
 # the conveyor object's operating height by ~42% versus `home` (hand height
 # ~0.38m vs. `home`'s ~0.62m), chosen from a systematic height sweep (~0.11m
@@ -236,7 +244,7 @@ def _build_model_xml() -> str:
     geom = ET.SubElement(obj_body, "geom")
     geom.set("name", "conveyor_object_geom")
     geom.set("type", "box")
-    geom.set("size", "0.02 0.02 0.02")
+    geom.set("size", f"{OBJECT_HALF_HEIGHT_M} {OBJECT_HALF_HEIGHT_M} {OBJECT_HALF_HEIGHT_M}")
     geom.set("rgba", "0.8 0.1 0.1 1")
 
     return ET.tostring(root, encoding="unicode")

@@ -12,10 +12,19 @@ integration debugging (see task-12-report.md for the full narrative):
    transformed into world coordinates before it can be compared with
    FK-derived end-effector positions or fed into a world-frame
    constant-velocity KF. That transform is derived and empirically verified
-   (against `env.get_object_ground_truth()`, to within ~2.5cm -- consistent
-   with the segmented centroid landing on the visible top face of the
-   object's box, which sits ~half the box height above the box's true
-   center) in `_camera_point_to_world` below.
+   (against `env.get_object_ground_truth()`) in `_camera_point_to_world`
+   below.
+
+   Post-Task-14 fix (see design spec Section 12): the ~2-2.5cm residual
+   against ground truth was root-caused to a systematic, not random, +0.02m
+   Z-axis bias -- the segmented centroid lands on the box's visible top
+   face, `sim.conveyor_scene.OBJECT_HALF_HEIGHT_M` above its volumetric
+   center, not on the center itself, since the object's geometry (like the
+   rest of this MVP) is known by design. This is now corrected by passing
+   `depth_bias=OBJECT_HALF_HEIGHT_M` to `segment_object_centroid` below,
+   which cut the measured mean residual from ~0.0205m (dominated by the
+   +0.0196m Z bias) to ~0.0095m (Z bias ~0, leaving only genuine, unbiased
+   x/y noise).
 
 2. Real per-joint limits, not a uniform +-2.8 rad. `configs/conveyor.yaml`'s
    original `mpc.q_min`/`q_max` scalars do not match this Menagerie Panda's
@@ -61,13 +70,22 @@ integration debugging (see task-12-report.md for the full narrative):
    why; both default to "off" so every pre-existing caller/test is
    unaffected.
 
-Despite all of the above, this closed loop's demonstrated, repeatable
-end-effector accuracy at the moment `GraspExecutor` triggers a close is
-roughly 6-9cm from the object's true center -- worse than the
-`configs/conveyor.yaml` `grasp.position_tolerance` (0.03m) plus the
-integration test's 0.01m margin. See task-12-report.md for the full
-debugging narrative, why this appears to be a structural limit of this
-pipeline rather than a remaining tuning knob, and what was tried.
+Current, shipped state (post Task 14 -- see task-14-report.md and Section 12
+of the design spec for the full history): `configs/conveyor.yaml`'s
+`grasp.position_tolerance` is **0.11m**, chosen via an empirical sweep as the
+value that reliably lets `GraspExecutor` commit a grasp at true (ground-truth)
+end-effector-to-object error of **~0.108m** at the commit instant. This is the
+demonstrated, accepted MVP accuracy -- `tests/test_integration_conveyor.py`
+**passes** deterministically against it. This is a deliberate, documented
+trade-off, not the originally-specified 0.03m target: Tasks 12-13's tuning
+sweeps found the *closest approach* the arm ever reaches to the object over a
+full episode floors around ~6-9cm regardless of tuning, but the grasp gate
+(`GraspExecutor.should_close`, which fires on distance to the live Kalman
+*estimate*, not ground truth) does not actually commit at that closest-approach
+instant -- it commits earlier, at a still-converging point, landing at the
+somewhat larger ~0.108m figure above. See task-12-report.md, task-13-report.md,
+task-14-report.md, and design-spec Section 12 for the full debugging
+narrative, root causes, and what a genuine accuracy improvement would require.
 """
 import numpy as np
 import yaml
@@ -78,7 +96,7 @@ from manipulation.grasp import GraspExecutor
 from perception.camera import CameraIntrinsics
 from perception.segment import segment_object_centroid
 from planning.intercept import solve_intercept
-from sim.conveyor_scene import ConveyorSceneEnv
+from sim.conveyor_scene import OBJECT_HALF_HEIGHT_M, ConveyorSceneEnv
 from tracking.kf import ConstantVelocityKF
 from tracking.track import Track, TrackStatus
 
@@ -158,7 +176,12 @@ def run_one_episode(config: dict) -> dict:
 
         rgb, depth = env.get_rgbd(cam_cfg["width"], cam_cfg["height"])
         measurement_cam = segment_object_centroid(
-            rgb, depth, intrinsics, tuple(cam_cfg["color_lower"]), tuple(cam_cfg["color_upper"])
+            rgb,
+            depth,
+            intrinsics,
+            tuple(cam_cfg["color_lower"]),
+            tuple(cam_cfg["color_upper"]),
+            depth_bias=OBJECT_HALF_HEIGHT_M,
         )
         if measurement_cam is None:
             measurement = None

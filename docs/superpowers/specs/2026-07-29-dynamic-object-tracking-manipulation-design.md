@@ -275,29 +275,48 @@ ReflexGrasp, ClosedLoopCatch.
   object's position from a fresh, close-range measurement partway through
   the descent, rather than committing to a single hold-still track taken
   from the reset pose) — see Section 12
+- Defining the target/grasp-commit gate/reported accuracy metric
+  consistently at the tool-center-point (fingertip) instead of the Panda's
+  flange (`hand`) frame — the pipeline currently commands and measures the
+  flange throughout, ~0.10m from the actual fingertip contact point; see
+  Section 12 for why this is not a simple offset fix
 
 ## 12. Demonstrated Accuracy & Known Limitation
 
-**Achieved real grasp accuracy: ~6-9cm** true (ground-truth) end-effector-to-
-object error at the moment of closest approach, measured directly against
-`env.get_object_ground_truth()` (not the perception/tracking estimate) across
-two independently-tested arm reset poses (Task 12's `home`-keyframe pose:
-0.061m closest approach; Task 13's shrunk-excursion `_RESET_QPOS`: 0.064m
-closest approach). This is the MVP's honest, demonstrated result — not the
-originally-specified `grasp.position_tolerance: 0.03` (3cm) target.
+**Achieved real grasp accuracy: ~10.8cm** true (ground-truth) end-effector-
+to-object error **at the instant `GraspExecutor` actually commits the grasp**
+— this is the number the shipped system delivers, measured directly against
+`env.get_object_ground_truth()` (not the perception/tracking estimate), and
+it is what `tests/test_integration_conveyor.py` verifies passes with margin
+at the shipped `grasp.position_tolerance: 0.11`. This, not the closest-
+approach figure below, is the MVP's headline, honest, demonstrated result —
+not the originally-specified `grasp.position_tolerance: 0.03` (3cm) target.
 
-A further, separate empirical finding from Task 14: `GraspExecutor.
-should_close` gates the actual grasp-commit instant on distance to the live
-Kalman-filter *estimate*, not ground truth, so `grasp.position_tolerance`
-controls not only whether a grasp is ever attempted but *when* — a looser
-gate commits earlier, against a less-converged MPC solution, which increases
-the true error at the commit instant. At the original 3cm tolerance the gate
-never fires at all within the step budget (`grasped: False` on every run).
-A fine-grained sweep (0.03–0.15m, all fully deterministic — this simulation
-has no randomness anywhere) found a stable plateau from ~0.098m to ~0.114m
-where the gate reliably commits at true error 0.108m; `grasp.
-position_tolerance` is set to **0.11m** as the point in that plateau with
-safety margin on both sides. See `task-14-report.md` for the full sweep.
+A separate, smaller number appears throughout Tasks 12-13's reports and is
+easy to mistake for the achieved result: **~6-9cm** is the closest true
+distance the end-effector *ever reaches* to the object over a full episode
+(0.061m at Task 12's `home`-keyframe reset pose, 0.064m at Task 13's
+shrunk-excursion `_RESET_QPOS`) — but at the original 0.03 tolerance that
+this figure was measured under, `GraspExecutor.should_close` **never actually
+fires** within the step budget (`grasped: False` on every run). No grasp is
+committed at that 6-9cm figure; it is the best-case approach distance the
+system reaches but declines to act on, not a delivered result. The system
+only ever actually grasps at the looser, shipped 0.11 tolerance, and only at
+the larger ~10.8cm error described above.
+
+**Task 14's key empirical finding, and why 10.8cm ≠ 6-9cm:**
+`GraspExecutor.should_close` gates the grasp-commit instant on distance to
+the live Kalman-filter *estimate*, not ground truth, so `grasp.
+position_tolerance` controls not only whether a grasp is ever attempted but
+*when* — a looser gate commits earlier, against a less-converged MPC
+solution, which increases the true error at the commit instant relative to
+the closest approach the same trajectory would eventually reach. A
+fine-grained sweep (0.03–0.15m, all fully deterministic — this simulation has
+no randomness anywhere) found a stable plateau from ~0.098m to ~0.114m where
+the gate reliably commits at true error 0.108m (step 1675, byte-
+reproducible); `grasp.position_tolerance` is set to **0.11m** as the point in
+that plateau with safety margin on both sides. See `task-14-report.md` for
+the full sweep.
 
 **Why the gap exists:**
 1. **Kinematic-only MPC vs. real position-servo dynamics.** `control/mpc.py`'s
@@ -308,14 +327,58 @@ safety margin on both sides. See `task-14-report.md` for the full sweep.
    MPC actually drives does not match the model it plans against, producing a
    genuine, unmodeled steady-state tracking gap, worse than pure numerical
    convergence error.
-2. **Perception/segmentation noise floor.** The classical color+depth
-   centroid measurement, transformed from camera frame to world frame and
-   checked directly against ground truth, has a measured ~2–2.5cm residual —
-   attributable to the segmented centroid landing on the visible top face of
-   the object's box rather than its volumetric center, plus off-axis viewing
-   angle effects. This noise floor propagates into the Kalman filter's
-   position and velocity estimates regardless of tuning.
-3. **Required arm excursion from reset pose to conveyor height.** The arm
+2. **A systematic, correctable perception bias — not an irreducible noise
+   floor (now corrected in code).** The camera-frame-to-world-frame centroid
+   measurement, checked directly against ground truth, has a measured
+   residual of ~2-2.5cm — but this is *not* unstructured noise that
+   "averages out" or is irreducible by tuning. It was measured as a stable,
+   systematic **+0.020m offset concentrated in the Z axis alone**, consistent
+   across different arm poses, and it is exactly the conveyor object's box
+   half-height (`OBJECT_HALF_HEIGHT_M = 0.02` in `sim/conveyor_scene.py`):
+   the segmentation centroid lands on the visible *top face* of the box, not
+   its volumetric center, because the wrist camera looks down at the object
+   from above. Since the object's geometry is known by design (see Section
+   7's "object geometry is known" constraint, which this project already
+   relies on elsewhere, e.g. Section 8/manipulation grasp-pose logic), this
+   was a one-line correctable offset, not an inherent sensing limitation —
+   and has been fixed: `perception/segment.py`'s `segment_object_centroid`
+   now takes an optional, additive `depth_bias` parameter (default 0.0,
+   backward-compatible with existing callers/tests), applied to the raw
+   camera-frame depth *before* deprojection (so it also proportionally
+   corrects the deprojected x/y, not just z). `run_conveyor_demo.py` passes
+   `sim.conveyor_scene.OBJECT_HALF_HEIGHT_M` for this parameter. Measured
+   directly against ground truth over the same static-hold window used to
+   discover the bias, this cut the mean per-measurement residual from
+   ~0.0205m (with a +0.0196m Z-axis mean, i.e. almost entirely the top-face
+   bias) to ~0.0095m (Z-axis mean ~-0.0004m, i.e. the systematic component is
+   gone; what remains is genuine, unbiased, sub-centimeter x/y noise). This
+   perception improvement does not, on its own, move the headline ~10.8cm
+   grasp-commit figure above by a meaningful amount — the flange/TCP offset
+   (item 3 below) and the kinematic-MPC/real-actuator-dynamics mismatch
+   (item 1 above) dominate the remaining gap — but it is a genuine, verified
+   fix to a previously-mischaracterized error source, and it should not be
+   re-introduced or re-described as "noise" in future work on this pipeline.
+3. **The flange (`hand`) frame, not the fingertip/TCP, is what is commanded,
+   gated on, and reported throughout this pipeline — undisclosed until now.**
+   `panda_fk_numpy`/`panda_fk_symbolic` (and therefore the MPC's target, the
+   grasp-distance gate, and every accuracy number in this section) all use
+   the Panda's `"hand"` (flange) body frame, not the actual fingertip contact
+   point. Measured directly against the open gripper's fingertip pad geoms at
+   the shipped reset pose, this offset is **~0.10m** (0.109m; distinct from,
+   and larger than, the ~6cm hand-to-finger-*body*-origin figure noted in
+   `task-12-report.md`'s finding #8, which measured to the finger body's
+   joint origin rather than the pad tip). Every accuracy number in this
+   section — the ~10.8cm headline, the 6-9cm closest-approach figure, and the
+   tolerance sweep — is stated in terms of this flange frame, not the TCP
+   where contact actually happens. This is a specific, nameable contributor
+   to the reported gap, distinct from (2) above, and it is **not** a cheap
+   fix: the reviewer-tested attempt of simply raising `_Z_CLEARANCE_M` (the
+   Z-clearance offset in `run_conveyor_demo.py`) to compensate made results
+   *worse*, not better, because `GraspExecutor.should_close`'s gate is
+   computed against the same flange frame as the target, so shifting one
+   without consistently redefining the other just moves the gate rather than
+   closing the flange-to-TCP gap.
+4. **Required arm excursion from reset pose to conveyor height.** The arm
    must travel a large distance (~0.57m at the `home` keyframe, ~0.24m at
    Task 13's shrunk-excursion reset pose) from its resting configuration down
    to the conveyor's operating height, which destabilizes the eye-in-hand
@@ -341,10 +404,20 @@ on the same conclusion: this is a structural accuracy ceiling of the
 kinematic-MPC + position-servo-actuator + classical-perception architecture,
 not a remaining tuning knob.
 
-**What a genuine fix would require:** an operational-space/impedance
-controller built against the arm's real dynamic model (rather than a
-kinematic-only integrator assumption), and/or active-vision re-acquisition
-during the final approach (re-confirming the object's position from a fresh,
-close-range measurement rather than relying on a single hold-still track
-established from the reset pose). Both are recorded in Section 11 as future
-work, explicitly out of this MVP's scope.
+**What a genuine fix would require:**
+- An operational-space/impedance controller built against the arm's real
+  dynamic model (rather than a kinematic-only integrator assumption).
+- Active-vision re-acquisition during the final approach (re-confirming the
+  object's position from a fresh, close-range measurement rather than
+  relying on a single hold-still track established from the reset pose).
+- **Defining the target, the grasp-commit gate, and the reported accuracy
+  metric consistently at the tool-center-point (fingertip) instead of the
+  flange** — a specific, nameable candidate item alongside the two above,
+  motivated directly by finding (3) above. As noted there, this is not a
+  drop-in offset fix (raising the Z-clearance alone was tested and made
+  things worse, since the gate itself is flange-based); it would require
+  redefining the FK target frame, the MPC's Cartesian cost, and
+  `GraspExecutor`'s distance check all together, at the TCP.
+
+All three items above are recorded in Section 11 as future work, explicitly
+out of this MVP's scope.

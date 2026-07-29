@@ -84,6 +84,27 @@ def test_nonzero_qdot_cmd_produces_sustained_joint_motion():
     assert checkpoints[200] > 0.03
 
 
+def test_reset_pose_within_joint_limits_with_safety_margin():
+    """Task 13's `_RESET_QPOS` is claimed (in its own module docstring and
+    task-13-report.md) to sit with >=1.0 rad of margin from every joint's
+    real `env.model.jnt_range` limit in both directions (measured minimum:
+    1.070 rad, on joint4's lower side). Verify that claim directly against
+    the actual compiled model after reset(), rather than trusting the sweep
+    narrative alone -- this is the one piece of Task 13's verification that
+    had no executable regression test.
+    """
+    env = ConveyorSceneEnv(conveyor_velocity=np.array([0.0, 0.1, 0.0]))
+    env.reset()
+    q_reset = env.get_joint_positions()
+    jnt_range = env.model.jnt_range[:7]
+
+    margin_to_lower = q_reset - jnt_range[:, 0]
+    margin_to_upper = jnt_range[:, 1] - q_reset
+
+    assert np.all(margin_to_lower >= 1.0), margin_to_lower
+    assert np.all(margin_to_upper >= 1.0), margin_to_upper
+
+
 def test_reset_pose_is_stable_under_zero_velocity_command():
     """qpos=0 is outside joint4's own range ([-3.0718, -0.0698]), so
     resetting to all-zeros left the arm drifting under constraint-recovery
