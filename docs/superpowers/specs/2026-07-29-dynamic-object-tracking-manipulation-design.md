@@ -267,3 +267,84 @@ ReflexGrasp, ClosedLoopCatch.
 - Real robot deployment / sim-to-real transfer
 - ROS2 wrapper layer around the finished Python modules
 - Full torque-level dynamic MPC (Pinocchio-based)
+- Operational-space/impedance control with a real dynamic model (i.e.
+  controlling to the actual position-servo/contact dynamics rather than a
+  kinematic-only integrator model) — see Section 12 for why the MVP's
+  kinematic MPC cannot close its residual accuracy gap without this
+- Active-vision re-acquisition during final approach (re-confirming the
+  object's position from a fresh, close-range measurement partway through
+  the descent, rather than committing to a single hold-still track taken
+  from the reset pose) — see Section 12
+
+## 12. Demonstrated Accuracy & Known Limitation
+
+**Achieved real grasp accuracy: ~6-9cm** true (ground-truth) end-effector-to-
+object error at the moment of closest approach, measured directly against
+`env.get_object_ground_truth()` (not the perception/tracking estimate) across
+two independently-tested arm reset poses (Task 12's `home`-keyframe pose:
+0.061m closest approach; Task 13's shrunk-excursion `_RESET_QPOS`: 0.064m
+closest approach). This is the MVP's honest, demonstrated result — not the
+originally-specified `grasp.position_tolerance: 0.03` (3cm) target.
+
+A further, separate empirical finding from Task 14: `GraspExecutor.
+should_close` gates the actual grasp-commit instant on distance to the live
+Kalman-filter *estimate*, not ground truth, so `grasp.position_tolerance`
+controls not only whether a grasp is ever attempted but *when* — a looser
+gate commits earlier, against a less-converged MPC solution, which increases
+the true error at the commit instant. At the original 3cm tolerance the gate
+never fires at all within the step budget (`grasped: False` on every run).
+A fine-grained sweep (0.03–0.15m, all fully deterministic — this simulation
+has no randomness anywhere) found a stable plateau from ~0.098m to ~0.114m
+where the gate reliably commits at true error 0.108m; `grasp.
+position_tolerance` is set to **0.11m** as the point in that plateau with
+safety margin on both sides. See `task-14-report.md` for the full sweep.
+
+**Why the gap exists:**
+1. **Kinematic-only MPC vs. real position-servo dynamics.** `control/mpc.py`'s
+   `KinematicMPC` plans as if `q̇ = u` were directly realizable (an idealized
+   velocity-controlled integrator). The real Panda actuators in this MuJoCo
+   model are position-servos with their own PD dynamics (Section 3.5 already
+   flags this as a deliberate simplification for tractability) — the plant the
+   MPC actually drives does not match the model it plans against, producing a
+   genuine, unmodeled steady-state tracking gap, worse than pure numerical
+   convergence error.
+2. **Perception/segmentation noise floor.** The classical color+depth
+   centroid measurement, transformed from camera frame to world frame and
+   checked directly against ground truth, has a measured ~2–2.5cm residual —
+   attributable to the segmented centroid landing on the visible top face of
+   the object's box rather than its volumetric center, plus off-axis viewing
+   angle effects. This noise floor propagates into the Kalman filter's
+   position and velocity estimates regardless of tuning.
+3. **Required arm excursion from reset pose to conveyor height.** The arm
+   must travel a large distance (~0.57m at the `home` keyframe, ~0.24m at
+   Task 13's shrunk-excursion reset pose) from its resting configuration down
+   to the conveyor's operating height, which destabilizes the eye-in-hand
+   wrist camera's orientation en route (the reconfiguration needed to reach
+   downward inherently reorients the whole downstream kinematic chain,
+   including the camera) and interacts with real, unmodeled floor/gripper
+   contact forces near the bottom of the descent.
+
+**What was tried to close the gap** (see `task-12-report.md` and
+`task-13-report.md` for full detail): Task 12 ran an exhaustive tuning sweep
+across effort weight, terminal weight, posture weight, control frequency,
+MPC horizon, intercept lead time, Z-clearance offset, and track-confirmation
+thresholds — no combination reliably produced true error under ~0.06m. Task
+13 tested the specific hypothesis that shrinking the required excursion (by
+changing the arm's reset joint configuration) would close the gap; a
+systematic sweep of reset-pose heights from ~0.11m to ~0.55m found accuracy
+is *non-monotonic* in excursion size (the largest excursion, `home` itself,
+produced the best accuracy in the whole sweep) — because the eye-in-hand
+camera's ground-footprint field of view shrinks along with the excursion,
+cutting how long the object stays visible before the tracker's m/n
+confirmation gate can even fire. Both investigations independently converged
+on the same conclusion: this is a structural accuracy ceiling of the
+kinematic-MPC + position-servo-actuator + classical-perception architecture,
+not a remaining tuning knob.
+
+**What a genuine fix would require:** an operational-space/impedance
+controller built against the arm's real dynamic model (rather than a
+kinematic-only integrator assumption), and/or active-vision re-acquisition
+during the final approach (re-confirming the object's position from a fresh,
+close-range measurement rather than relying on a single hold-still track
+established from the reset pose). Both are recorded in Section 11 as future
+work, explicitly out of this MVP's scope.
