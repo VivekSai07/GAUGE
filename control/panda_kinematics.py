@@ -18,7 +18,22 @@ import casadi as ca
 import numpy as np
 
 # a_{i-1} (m), alpha_{i-1} (rad), d_i (m) for i = 1..7, then the fixed flange offset.
-_A = [0.0, 0.0, 0.0825, -0.0825, 0.0, 0.088, 0.0]
+#
+# Task 12 integration finding: this array was originally
+# [0.0, 0.0, 0.0825, -0.0825, 0.0, 0.088, 0.0] -- shifted one index early
+# relative to the alpha/d/theta it's paired with in the loop below (each
+# entry held a_{i} instead of a_{i-1}). This coincidentally reproduces the
+# correct end-effector position at q = 0 (where sin(theta) terms vanish and
+# most a-dependent offsets don't propagate), which is why
+# test_casadi_fk_matches_independent_numpy_fk_at_zero_config passed despite
+# the bug -- but it diverges sharply at nonzero joint angles: cross-checked
+# against the actual Menagerie Panda MJCF's compiled "hand" body position
+# (ground truth from mujoco.mj_forward) in
+# tests/control/test_panda_kinematics.py, the old array gave a 0.245 m
+# position error at the conveyor scene's home keyframe pose. The corrected
+# array below reproduces the MuJoCo "hand" body xpos exactly (<1e-9 m) at
+# q=0, at the home keyframe, and across 5 random configurations.
+_A = [0.0, 0.0, 0.0, 0.0825, -0.0825, 0.0, 0.088]
 _ALPHA = [0.0, -np.pi / 2, np.pi / 2, np.pi / 2, -np.pi / 2, np.pi / 2, np.pi / 2]
 _D = [0.333, 0.0, 0.316, 0.0, 0.384, 0.0, 0.0]
 _FLANGE_A, _FLANGE_ALPHA, _FLANGE_D = 0.0, 0.0, 0.107

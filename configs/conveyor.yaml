@@ -1,0 +1,58 @@
+# Tuning deviations from the Task 12 brief's suggested values, and why --
+# see task-12-report.md for the full debugging narrative.
+#
+# - max_steps: raised from 2000 to 8000. At control_hz=20 and dt=0.002,
+#   2000 steps is only 80 control ticks (4s) -- nowhere near enough time to
+#   hold-and-wait for a good velocity estimate (see run_conveyor_demo.py's
+#   staged hold/move logic) and still complete a ~0.5m approach.
+# - mpc.q_min/q_max: REMOVED. The real Panda's per-joint limits are not a
+#   uniform +-2.8 rad (e.g. joint4 is entirely negative, joint6 entirely
+#   positive) -- run_conveyor_demo.py now reads the real ranges from
+#   env.model.jnt_range instead of trusting a scalar here.
+# - mpc.posture_weight/terminal_weight: added. See control/mpc.py's
+#   docstring for both -- they bias the arm's redundant nullspace away from
+#   a real Panda wrist singularity encountered during integration, and push
+#   the solver to more fully close the position gap within its horizon.
+# - track.m/n: raised from 3/5 to 25/30. The default confirmed a track after
+#   only ~3 measurements, nowhere near enough for the Kalman filter's
+#   velocity estimate to converge against the segmentation noise floor
+#   (~2-2.5cm per measurement) -- observed estimating v_y as low as
+#   0.005 m/s against a true 0.08 m/s. Waiting for more hits (while the arm
+#   holds still, well within the ~7s the object stays visible to a static
+#   camera) gives a much better initial velocity fix.
+# - track.max_consecutive_misses: raised from 5 to 100. The wrist-mounted
+#   camera loses sight of the object as soon as the arm starts its
+#   descent (a geometric consequence of the required ~0.5m excursion, not a
+#   tuning bug -- see task-12-report.md); the Kalman filter needs to keep
+#   dead-reckoning through that blind period without the track going LOST.
+
+conveyor_velocity: [0.0, 0.08, 0.0]
+dt: 0.002
+control_hz: 20
+max_steps: 8000
+
+camera:
+  width: 64
+  height: 64
+  color_lower: [150, 0, 0]
+  color_upper: [255, 80, 80]
+
+kf:
+  process_var: 1.0e-4
+  meas_var: 1.0e-3
+  init_cov_scale: 0.05
+
+track:
+  gate_threshold: 9.0
+  m: 25
+  n: 30
+  max_consecutive_misses: 100
+
+mpc:
+  horizon: 5
+  qdot_max: 1.5
+  posture_weight: 0.01
+  terminal_weight: 5.0
+
+grasp:
+  position_tolerance: 0.03
