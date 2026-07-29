@@ -1,0 +1,3 @@
+[submodule "sim/assets/menagerie"]
+	path = sim/assets/menagerie
+	url = https://github.com/google-deepmind/mujoco_menagerie.git
