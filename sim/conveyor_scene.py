@@ -63,7 +63,29 @@ detail):
    `ctrl[7] = 0.04 if not closed else 0.0` assumed the pre-remap 0-0.04
    range and would barely crack the gripper open; `set_gripper` uses
    `0.0` / `255.0` instead.
+
+Post-review fixes (see task-2-report.md "Fix report" section for detail):
+
+7. The wrist camera's `euler="0 0 0"` pointed it *away* from the
+   fingers/workspace, back into the arm (`dot(cam_forward,
+   direction_to_fingers) == -1.0` at every pose, verified empirically -- a
+   fixed local-frame mismatch, not pose-dependent). panda.xml's
+   `<compiler angle="radian">` means `euler` values are radians, not
+   degrees, which also made an initial "180 0 0" (i.e. 180 *radians*) test
+   rotation land nowhere near a clean 180 degree flip. The camera now uses
+   `euler="{pi} 0 0"` (pi radians = 180 degrees), verified to give
+   `dot(cam_forward, direction_to_fingers) ~= 1.0` both at qpos=0 and at an
+   arbitrary bent pose.
+
+8. `reset()` used to leave `qpos` at all-zeros, which is outside joint4's
+   own range (`[-3.0718, -0.0698]`, does not include 0) -- with no
+   commanded velocity, constraint-recovery forces alone visibly drifted the
+   arm over the first ~20 steps. `reset()` now loads panda.xml's `home`
+   keyframe (a valid, in-range resting pose) via
+   `mj_resetDataKeyframe` when present, falling back to `mj_resetData`'s
+   default zero pose otherwise.
 """
+import math
 from pathlib import Path
 
 import defusedxml.ElementTree as DefusedET
@@ -79,6 +101,13 @@ _SCENE_XML = _MENAGERIE_DIR / "scene.xml"
 # named "hand" -- the brief's documented fallback -- so the eye-in-hand
 # camera is mounted directly on that body instead of at a named site.
 _ATTACHMENT_BODY = "hand"
+# panda.xml declares <compiler angle="radian">, so this rotates the camera
+# by pi radians (180 degrees) about its local X axis, flipping its boresight
+# from "into the arm" to "toward the fingers/workspace" -- verified via
+# dot(cam_forward, direction_to_fingers) ~= 1.0 at multiple poses (see
+# module docstring, point 7).
+_CAMERA_EULER = f"{math.pi} 0 0"
+_HOME_KEYFRAME = "home"
 
 
 def _build_model_xml() -> str:
@@ -126,7 +155,7 @@ def _build_model_xml() -> str:
     camera.set("name", "wrist_cam")
     camera.set("mode", "fixed")
     camera.set("pos", "0 0 0.05")
-    camera.set("euler", "0 0 0")
+    camera.set("euler", _CAMERA_EULER)
     camera.set("fovy", "58")
 
     # Add a scripted (mocap) conveyor object -- driven by our own step(),
@@ -169,6 +198,14 @@ class ConveyorSceneEnv:
 
     def reset(self) -> None:
         mujoco.mj_resetData(self.model, self.data)
+        # mj_resetData's default all-zero qpos is outside joint4's own range
+        # ([-3.0718, -0.0698], does not include 0), which causes visible
+        # constraint-recovery drift under a zero velocity command (see
+        # module docstring, point 8). Prefer the model's "home" keyframe --
+        # a valid, settled resting pose -- when available.
+        key_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_KEY, _HOME_KEYFRAME)
+        if key_id >= 0:
+            mujoco.mj_resetDataKeyframe(self.model, self.data, key_id)
         mujoco.mj_forward(self.model, self.data)
         self._q_target = self.data.qpos[:7].copy()
         self.data.ctrl[:7] = self._q_target
