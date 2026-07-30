@@ -442,8 +442,11 @@ trajectory would eventually reach. See `task-14-report.md` and
    without consistently redefining the other just moves the gate rather than
    closing the flange-to-TCP gap.
 4. **Required arm excursion from reset pose to conveyor height.** The arm
-   must travel a large distance (~0.57m at the `home` keyframe, ~0.24m at
-   Task 13's shrunk-excursion reset pose) from its resting configuration down
+   must travel a large distance (~0.57m at the `home` keyframe, ~0.33m at
+   Task 13's shrunk-excursion reset pose -- a 42% reduction versus `home`,
+   not the ~0.24m sometimes quoted, which is the reduction in flange height
+   versus `home` rather than the remaining descent to the conveyor) from its
+   resting configuration down
    to the conveyor's operating height, which destabilizes the eye-in-hand
    wrist camera's orientation en route (the reconfiguration needed to reach
    downward inherently reorients the whole downstream kinematic chain,

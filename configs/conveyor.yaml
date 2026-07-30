@@ -64,8 +64,9 @@ mpc:
 # -approach-to-ground-truth observed across both arm reset poses: 0.061-
 # 0.064m) -- not fixable by config tuning within this architecture. At the
 # original 0.03 tolerance, GraspExecutor.should_close (which gates on
-# distance to the live KF *estimate*, not ground truth) never actually
-# triggers within max_steps at all (confirmed: `grasped: False` every run).
+# distance to the commanded target -- the live KF estimate plus a small
+# offset, not ground truth) never actually triggers within max_steps at all
+# (confirmed: `grasped: False` every run).
 #
 # Task 14 first re-swept this (0.03-0.15) and shipped 0.11, reasoning it sat
 # in a "stable plateau" -- but that sweep did not check whether a *tighter*
