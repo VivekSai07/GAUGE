@@ -1,5 +1,7 @@
 # GAUGE — Gated Uncertainty-Aware Grasping Engine
 
+[![CI](https://github.com/VivekSai07/GAUGE/actions/workflows/ci.yml/badge.svg)](https://github.com/VivekSai07/GAUGE/actions/workflows/ci.yml)
+
 A MuJoCo-simulated Franka Panda arm with an eye-in-hand RGB-D camera that
 detects, tracks (Kalman filter with Mahalanobis gating and m/n track
 confirmation), predicts, computes a closed-form interception point for, and

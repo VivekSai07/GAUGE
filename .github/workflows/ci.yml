@@ -5,23 +5,44 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch: {}
+
+# Cancel a still-running CI job for the same branch/PR when a new commit
+# lands, instead of burning minutes on a run that's already obsolete.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       # mujoco.Renderer (used by tests exercising get_rgbd()) needs a GL
       # backend that works without a display; osmesa is pure software
       # rendering and needs no GPU/driver, just libosmesa6-dev below.
       MUJOCO_GL: osmesa
     steps:
-      - name: Checkout repository (with submodules)
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          # sim/assets/menagerie is a git submodule providing the Panda XML
-          # assets sim/conveyor_scene.py loads; without this the sim tests
-          # fail with missing-file errors, not an obviously related message.
-          submodules: true
+        # Submodule intentionally NOT checked out here -- see the sparse
+        # checkout step below.
+
+      - name: Sparse-checkout franka_emika_panda from the menagerie submodule
+        run: |
+          set -e
+          SUBMODULE_PATH=sim/assets/menagerie
+          SUBMODULE_URL=$(git config -f .gitmodules --get submodule.$SUBMODULE_PATH.url)
+          SUBMODULE_SHA=$(git ls-tree HEAD -- "$SUBMODULE_PATH" | awk '{print $3}')
+          # The full mujoco_menagerie repo is ~1.8GB across ~70 robot dirs;
+          # sim/conveyor_scene.py only ever loads franka_emika_panda/
+          # (~36MB). A blobless + sparse clone fetches history/tree metadata
+          # only, then checks out just that one directory at the exact
+          # commit the superproject has pinned.
+          git clone --filter=blob:none --no-checkout --sparse "$SUBMODULE_URL" "$SUBMODULE_PATH"
+          cd "$SUBMODULE_PATH"
+          git sparse-checkout set franka_emika_panda
+          git checkout "$SUBMODULE_SHA"
 
       - name: Install system libraries for headless MuJoCo rendering
         run: |
@@ -41,5 +62,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
-      - name: Run tests
-        run: uv run pytest -v
+      - name: Run tests with coverage
+        run: uv run pytest -v --cov --cov-report=term-missing
+
+      - name: CLI smoke test (run_conveyor_demo.py entry point)
+        # Exercises the actual __main__ entry point (argv handling, config
+        # loading from disk) in a way the pytest suite doesn't, since tests
+        # call run_one_episode() directly rather than shelling out to this.
+        run: uv run python run_conveyor_demo.py
