@@ -26,7 +26,9 @@ jobs:
       - name: Install system libraries for headless MuJoCo rendering
         run: |
           sudo apt-get update
-          sudo apt-get install -y libosmesa6-dev libgl1-mesa-glx libglfw3
+          # libgl1-mesa-glx was dropped from Ubuntu 24.04 (noble) and isn't
+          # needed anyway: osmesa is pure software rendering, no GLX/display.
+          sudo apt-get install -y libosmesa6-dev
 
       - name: Install uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
