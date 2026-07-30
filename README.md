@@ -13,21 +13,24 @@ plain Python modules wired together in `run_conveyor_demo.py`.
 
 ## Demonstrated result
 
-At `configs/conveyor.yaml`'s shipped `grasp.position_tolerance: 0.075`, the
-system grasps at a true (ground-truth) end-effector-to-object error of
-**~7.1cm**, verified deterministically by `tests/test_integration_conveyor.py`.
-This is an honest, documented outcome, not the originally-targeted 3cm — see
+At `configs/conveyor.yaml`'s shipped `grasp.position_tolerance: 0.035`, the
+system grasps at a true (ground-truth) fingertip-to-object error of
+**~4.4cm**, verified deterministically by `tests/test_integration_conveyor.py`
+— close to the originally-targeted 3cm. The conveyor object is a real,
+physically-simulated body (not a scripted ghost), so the gripper can
+actually hold it. See
 [the design spec's Section 12](docs/superpowers/specs/2026-07-29-dynamic-object-tracking-manipulation-design.md#12-demonstrated-accuracy--known-limitation)
-for the full root-cause analysis (kinematic-MPC vs. real actuator dynamics,
-perception noise, and the flange-vs-fingertip frame gap) and what a genuine
-accuracy improvement would require.
+for the full history, including an earlier ~7cm result and the three
+specific fixes (real object physics, a smoothed approach target, and
+fingertip-consistent targeting) that closed most of the gap.
 
 ## Running it
 
 ```bash
 uv sync
-uv run pytest -v                     # full test suite
-uv run python run_conveyor_demo.py   # one closed-loop episode
+uv run pytest -v                       # full test suite
+uv run python run_conveyor_demo.py     # one closed-loop episode, headless
+uv run python run_conveyor_demo.py --render   # same, with a live viewer window
 ```
 
 ## Project structure

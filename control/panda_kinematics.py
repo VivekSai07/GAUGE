@@ -45,6 +45,16 @@ _A = [0.0, 0.0, 0.0, 0.0825, -0.0825, 0.0, 0.088]
 _ALPHA = [0.0, -np.pi / 2, np.pi / 2, np.pi / 2, -np.pi / 2, np.pi / 2, np.pi / 2]
 _D = [0.333, 0.0, 0.316, 0.0, 0.384, 0.0, 0.0]
 _FLANGE_A, _FLANGE_ALPHA, _FLANGE_D = 0.0, 0.0, 0.107
+# Fixed offset from the flange ("hand" body) origin to the midpoint between
+# the two fingertip pads, along the flange's local Z axis. Both fingers open
+#/close symmetrically about this axis, so the midpoint is invariant to the
+# gripper's opening width -- this offset does not depend on finger joint
+# state, only on the flange's pose. Measured directly against the compiled
+# MuJoCo model (average of both fingertip pad geoms' world positions,
+# expressed in the flange's local frame) and confirmed identical to
+# floating-point precision (<1e-16 m) across two very different arm
+# configurations, so it is safe to treat as a fixed constant here.
+_TCP_OFFSET_Z = 0.1029
 
 
 def _dh_transform_ca(a: float, alpha: float, d: float, theta: ca.SX) -> ca.SX:
@@ -60,7 +70,7 @@ def _dh_transform_ca(a: float, alpha: float, d: float, theta: ca.SX) -> ca.SX:
 
 
 def panda_fk_symbolic() -> ca.Function:
-    """Return a CasADi Function mapping q (7,) to end-effector position (3,)."""
+    """Return a CasADi Function mapping q (7,) to flange position (3,)."""
     q = ca.SX.sym("q", 7)
     T = ca.SX.eye(4)
     for i in range(7):
@@ -68,6 +78,20 @@ def panda_fk_symbolic() -> ca.Function:
     T = T @ _dh_transform_ca(_FLANGE_A, _FLANGE_ALPHA, _FLANGE_D, 0.0)
     ee_pos = T[0:3, 3]
     return ca.Function("panda_fk", [q], [ee_pos])
+
+
+def panda_tcp_symbolic() -> ca.Function:
+    """Return a CasADi Function mapping q (7,) to the fingertip-pad midpoint
+    (tool-center-point) position (3,) -- the flange position plus the fixed
+    `_TCP_OFFSET_Z` translation along the flange's local Z axis."""
+    q = ca.SX.sym("q", 7)
+    T = ca.SX.eye(4)
+    for i in range(7):
+        T = T @ _dh_transform_ca(_A[i], _ALPHA[i], _D[i], q[i])
+    T = T @ _dh_transform_ca(_FLANGE_A, _FLANGE_ALPHA, _FLANGE_D, 0.0)
+    T = T @ _dh_transform_ca(0.0, 0.0, _TCP_OFFSET_Z, 0.0)
+    tcp_pos = T[0:3, 3]
+    return ca.Function("panda_tcp", [q], [tcp_pos])
 
 
 def _dh_transform_np(a: float, alpha: float, d: float, theta: float) -> np.ndarray:
@@ -85,9 +109,20 @@ def _dh_transform_np(a: float, alpha: float, d: float, theta: float) -> np.ndarr
 
 
 def panda_fk_numpy(q: np.ndarray) -> np.ndarray:
-    """Pure-numpy reference FK: q (7,) -> end-effector position (3,)."""
+    """Pure-numpy reference FK: q (7,) -> flange position (3,)."""
     T = np.eye(4)
     for i in range(7):
         T = T @ _dh_transform_np(_A[i], _ALPHA[i], _D[i], q[i])
     T = T @ _dh_transform_np(_FLANGE_A, _FLANGE_ALPHA, _FLANGE_D, 0.0)
+    return T[0:3, 3]
+
+
+def panda_tcp_numpy(q: np.ndarray) -> np.ndarray:
+    """Pure-numpy reference: q (7,) -> fingertip-pad midpoint (TCP) position
+    (3,) -- see `panda_tcp_symbolic` for the offset this adds."""
+    T = np.eye(4)
+    for i in range(7):
+        T = T @ _dh_transform_np(_A[i], _ALPHA[i], _D[i], q[i])
+    T = T @ _dh_transform_np(_FLANGE_A, _FLANGE_ALPHA, _FLANGE_D, 0.0)
+    T = T @ _dh_transform_np(0.0, 0.0, _TCP_OFFSET_Z, 0.0)
     return T[0:3, 3]

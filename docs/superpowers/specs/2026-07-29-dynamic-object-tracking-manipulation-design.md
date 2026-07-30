@@ -286,11 +286,17 @@ ReflexGrasp, ClosedLoopCatch.
   object's position from a fresh, close-range measurement partway through
   the descent, rather than committing to a single hold-still track taken
   from the reset pose) — see Section 12
-- Defining the target/grasp-commit gate/reported accuracy metric
-  consistently at the tool-center-point (fingertip) instead of the Panda's
-  flange (`hand`) frame — the pipeline currently commands and measures the
-  flange throughout, ~0.10m from the actual fingertip contact point; see
-  Section 12 for why this is not a simple offset fix
+- **[Implemented — see Section 12]** Defining the target/grasp-commit
+  gate/reported accuracy metric consistently at the tool-center-point
+  (fingertip) instead of the Panda's flange (`hand`) frame was listed here
+  as future work; it has since been implemented (`panda_tcp_numpy`/
+  `panda_tcp_symbolic` in `control/panda_kinematics.py`), prompted by a
+  user-reported visual grasp failure. Kept here struck through rather than
+  deleted so the history is legible.
+- Verified grasp *completion* (not just commit-instant distance) — checking
+  `env.data.ncon`/`env.data.contact` after the gripper closes to confirm the
+  fingers actually make and hold contact, rather than only measuring
+  distance at the commit instant. Still not implemented.
 - `prediction.predict.propagate()` (Section 3.3) is fully built and tested
   but is not imported or called anywhere in `run_conveyor_demo.py` — the
   MVP's closed-form constant-velocity interception solve
@@ -309,22 +315,26 @@ ReflexGrasp, ClosedLoopCatch.
 
 ## 12. Demonstrated Accuracy & Known Limitation
 
-**Achieved real grasp accuracy: ~7.1cm** true (ground-truth) end-effector-
-to-object error **at the instant `GraspExecutor` actually commits the grasp**
-— this is the number the shipped system delivers, measured directly against
-`env.get_object_ground_truth()` (not the perception/tracking estimate), and
-it is what `tests/test_integration_conveyor.py` verifies passes with margin
-at the shipped `grasp.position_tolerance: 0.075`. This is the MVP's headline,
-honest, demonstrated result — not the originally-specified `grasp.
-position_tolerance: 0.03` (3cm) target, and (per Task 15's correction below)
-also not the ~10.8cm figure a prior task revision of this section reported.
-Note this is a *commit-instant distance*, not a verified successful grasp:
-`run_conveyor_demo.py` commands the gripper closed and holds a few more
-simulation steps so the motion visibly plays out, but nothing in this
-pipeline verifies the fingers actually make and hold contact (no check on
-`env.data.ncon`/`env.data.contact` after closing) — closing the loop on
-verified grasp completion, not just commit-instant distance, would be a
-reasonable addition alongside the other Section 11 future-work items.
+**Achieved real grasp accuracy: ~4.4cm** true (ground-truth) fingertip-to-
+object error **at the instant `GraspExecutor` actually commits the grasp**,
+at `grasp.position_tolerance: 0.035` — this is the number the shipped system
+currently delivers, measured directly against `env.get_object_ground_truth()`
+(not the perception/tracking estimate) and against the real fingertip-pad
+position (not the flange), and it is what `tests/test_integration_conveyor.py`
+verifies passes deterministically. This is very close to the originally-
+specified `grasp.position_tolerance: 0.03` (3cm) target. **This supersedes
+every number earlier in this section** (~7.1cm, ~10.8cm, ~6-9cm) — see "Round
+2: closing the gap" below for what changed and why. The rest of this section
+up to that point is preserved as accurate history of how the team arrived at
+the ~7cm figure and why it was believed, at the time, to be a structural
+ceiling; it wasn't.
+
+Note the ~4.4cm figure is still a *commit-instant distance*, not a verified
+successful grasp: `run_conveyor_demo.py` commands the gripper closed and
+holds a few more simulation steps so the motion visibly plays out, but
+nothing in this pipeline verifies the fingers actually make and hold contact
+(no check on `env.data.ncon`/`env.data.contact` after closing) — see
+Section 11.
 
 A separate, smaller number appears throughout Tasks 12-13's reports: **~6-9cm**
 is the closest true distance the end-effector *ever reaches* to the object
@@ -470,20 +480,110 @@ on the same conclusion: this is a structural accuracy ceiling of the
 kinematic-MPC + position-servo-actuator + classical-perception architecture,
 not a remaining tuning knob.
 
-**What a genuine fix would require:**
+**What was believed, at the time, to require a genuine architecture change**
+(now partly done — see "Round 2" below):
 - An operational-space/impedance controller built against the arm's real
-  dynamic model (rather than a kinematic-only integrator assumption).
-- Active-vision re-acquisition during the final approach (re-confirming the
-  object's position from a fresh, close-range measurement rather than
-  relying on a single hold-still track established from the reset pose).
-- **Defining the target, the grasp-commit gate, and the reported accuracy
+  dynamic model (rather than a kinematic-only integrator assumption). —
+  *Still not done; remains real future work, recorded in Section 11.*
+- Active-vision re-acquisition during the final approach. — *Still not done;
+  remains real future work, recorded in Section 11.*
+- Defining the target, the grasp-commit gate, and the reported accuracy
   metric consistently at the tool-center-point (fingertip) instead of the
-  flange** — a specific, nameable candidate item alongside the two above,
-  motivated directly by finding (3) above. As noted there, this is not a
-  drop-in offset fix (raising the Z-clearance alone was tested and made
-  things worse, since the gate itself is flange-based); it would require
-  redefining the FK target frame, the MPC's Cartesian cost, and
-  `GraspExecutor`'s distance check all together, at the TCP.
+  flange. — ***Done, see below.*** At the time this was written, the team had
+  only tested raising the Z-clearance offset (which made things worse, since
+  the gate itself was still flange-based) and concluded a full TCP-consistent
+  redefinition was needed but hadn't attempted it. It turned out to be the
+  single highest-leverage fix of the three.
 
-All three items above are recorded in Section 11 as future work, explicitly
-out of this MVP's scope.
+---
+
+## Round 2: closing the gap (prompted by a rendered demo, not a metric)
+
+Everything above this point was written when the team's only feedback signal
+was the numeric `grasp_error_m` output and a fine-grained tolerance sweep.
+The gap was reopened by a much blunter signal: running
+`uv run python run_conveyor_demo.py --render` and *watching* the episode.
+The gripper visibly closed well clear of the object, and the episode ended
+without anything resembling a pick. That observation, followed by systematic
+root-cause investigation (per `superpowers:systematic-debugging`) rather than
+another tuning pass, found three real, fixable problems — not one bigger
+version of the same "structural ceiling":
+
+1. **The conveyor object was a `mocap` body.** MuJoCo `mocap` bodies are
+   kinematically scripted and are not affected by contact or gripper forces
+   at all. Closing the gripper "around" one never grasps it in any physical
+   sense, independent of targeting accuracy — it keeps sliding along its
+   scripted trajectory regardless of what the gripper does. This was found
+   by comparing this project's conveyor implementation against an external
+   reference (`github.com/felixokolo/MuJoCo_tutorials/1/conveyor.xml`, MIT/
+   public tutorial repo), which drives its object via a `free` joint plus a
+   `velocity` actuator instead — a real, physically-simulated body. Fixed in
+   `sim/conveyor_scene.py`: the object is now a `free`-jointed body with two
+   `velocity` actuators (world X/Y), resting on a newly-added static
+   platform sized so it settles at the same operating height (z=0.05) the
+   rest of the pipeline already assumed. Still exactly constant-velocity by
+   design (the actuators hold a fixed commanded velocity for the whole
+   episode) — but now a real body the gripper can actually nudge, grip, and
+   hold, which is a *prerequisite* for any real pick-and-place, independent
+   of accuracy.
+
+2. **A hard discontinuity in the target definition.** `run_one_episode`'s
+   approach logic switched abruptly between two different target
+   definitions at `live_dist == _CLOSE_RANGE_M`: a `solve_intercept`
+   lookahead point (which deliberately leads the object, extrapolating
+   its future position) above that threshold, and the raw live Kalman
+   estimate (which does not lead it) below. Instrumented logging of a full
+   episode showed the target's along-track coordinate jumping by roughly
+   0.10m at that exact boundary — the arm, still converging toward the
+   pre-switch (leading) target, would overshoot past the object right where
+   the switch fired, which is exactly what the rendered run showed
+   visually. Fixed by replacing the hard switch with a continuous blend
+   (`blend = clip(live_dist / _CLOSE_RANGE_M, 0, 1)`, linearly interpolating
+   between the lookahead point and the live estimate) — `target` now moves
+   continuously with no jump.
+
+3. **Flange-vs-TCP was not just under-disclosed, it was actionable.**
+   Section 12's earlier text (finding 3, above) treated the flange/TCP gap
+   as a real but not-cheaply-fixable contributor. Once (1) and (2) were
+   fixed, direct measurement showed the *fingertip*-level error was already
+   far better than the flange-based number suggested (~5cm vs. a ~9cm flange
+   floor) — the flange number was dominated by the flange simply sitting
+   ~0.10m above the object in Z, not by genuine misalignment. This meant
+   consistently redefining target/gate/metric at the TCP wasn't a marginal
+   correction, it was the actual fix. Implemented via two new functions in
+   `control/panda_kinematics.py`, `panda_tcp_numpy`/`panda_tcp_symbolic`,
+   extending the existing flange FK by one fixed additional translation
+   (`_TCP_OFFSET_Z = 0.1029`, the distance from the flange origin to the
+   midpoint between the two fingertip pads along the flange's local Z axis
+   — verified fixed and pose-independent to floating-point precision, since
+   both fingers open/close symmetrically about that axis). `run_conveyor_demo.py`
+   now uses `panda_tcp_*` everywhere `panda_fk_*` was previously used: the
+   MPC's own Cartesian cost (`KinematicMPC`'s `fk_func`) now optimizes
+   fingertip position directly, `GraspExecutor.should_close` gates on
+   fingertip distance, and `grasp_error_m` reports fingertip-to-object
+   distance. The Z-clearance offset that (1) originally needed (to keep the
+   flange-following approach from driving the fingers through the floor) is
+   removed entirely — targeting the object's own center height is now
+   correct, since that's where the fingertips should be.
+
+**Result:** a full deterministic re-sweep of `grasp.position_tolerance` on
+the fixed code found the achievable accuracy is dramatically better than the
+~6-9cm figure believed structural above — down to a floor around 2.8cm
+(where the gate stops firing reliably), with **0.035 chosen as the shipped
+value: ~4.4cm true fingertip-to-object accuracy**, close to the originally-
+specified 0.03m target. See `configs/conveyor.yaml`'s comment for the full
+sweep table. All 47 tests pass, `uv run python run_conveyor_demo.py`
+reproduces the same result byte-for-byte across repeated runs (fully
+deterministic, no randomness anywhere in this simulation).
+
+**What this does and doesn't mean:** the operational-space/impedance-control
+and active-vision-reacquisition items above are still real, unimplemented
+future work — closing the gap didn't require either of them in the end. The
+lesson is less "the architecture was fine all along" and more "a tuning
+sweep against a single aggregate metric can converge on a local optimum and
+mistake it for a structural ceiling, when the actual problem is a specific,
+fixable mechanism (a discontinuity, a wrong reference frame, a body that
+can't physically be grasped) that a sweep alone will never surface." All
+three fixes here came from watching the system run and tracing a concrete,
+reproducible failure back to its mechanism — not from trying more
+combinations of the same knobs.

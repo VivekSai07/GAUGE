@@ -1,4 +1,5 @@
-"""MuJoCo conveyor scene: Panda arm + eye-in-hand camera + scripted mocap object.
+"""MuJoCo conveyor scene: Panda arm + eye-in-hand camera + a real, physically
+simulated conveyor object.
 
 Deviations from the Task 2 brief's literal code (see task-2-report.md for full
 detail):
@@ -234,18 +235,72 @@ def _build_model_xml() -> str:
     camera.set("euler", _CAMERA_EULER)
     camera.set("fovy", "58")
 
-    # Add a scripted (mocap) conveyor object -- driven by our own step(),
-    # not MuJoCo contact/friction physics, since conveyor motion is exactly
-    # constant-velocity by design.
+    # Static platform for the object to physically rest on. Top surface at
+    # z=0.03 so a resting OBJECT_HALF_HEIGHT_M=0.02 box has its center at
+    # z=0.05, preserving the "conveyor operating height" every other module
+    # (perception depth_bias, _Z_CLEARANCE_M, documented figures) assumes.
+    platform = ET.SubElement(worldbody, "body")
+    platform.set("name", "conveyor_platform")
+    platform.set("pos", "0.5 0.0 0.015")
+    platform_geom = ET.SubElement(platform, "geom")
+    platform_geom.set("name", "conveyor_platform_geom")
+    platform_geom.set("type", "box")
+    platform_geom.set("size", "0.15 1.0 0.015")  # spans the object's travel path in y
+    platform_geom.set("rgba", "0.3 0.3 0.3 1")
+
+    # Real, physically-simulated conveyor object (free joint + velocity
+    # actuators), not a `mocap` body. A mocap body is kinematically
+    # scripted and cannot be affected by contact/gripper forces at all --
+    # closing the gripper "around" one never actually grasps it, regardless
+    # of targeting accuracy, since it isn't attached and keeps sliding along
+    # its scripted path. This follows the same pattern as
+    # github.com/felixokolo/MuJoCo_tutorials/1/conveyor.xml: a free-jointed
+    # body driven directly by a velocity actuator (not carried by belt
+    # friction), so it's still exactly constant-velocity by design, but is
+    # now a real body the gripper can physically nudge, grip, and hold.
     obj_body = ET.SubElement(worldbody, "body")
     obj_body.set("name", "conveyor_object")
-    obj_body.set("mocap", "true")
     obj_body.set("pos", "0.5 -0.3 0.05")
+    obj_joint = ET.SubElement(obj_body, "joint")
+    obj_joint.set("name", "conveyor_object_joint")
+    obj_joint.set("type", "free")
+    obj_joint.set("damping", "0.1")
     geom = ET.SubElement(obj_body, "geom")
     geom.set("name", "conveyor_object_geom")
     geom.set("type", "box")
     geom.set("size", f"{OBJECT_HALF_HEIGHT_M} {OBJECT_HALF_HEIGHT_M} {OBJECT_HALF_HEIGHT_M}")
     geom.set("rgba", "0.8 0.1 0.1 1")
+    geom.set("mass", "0.05")
+    geom.set("friction", "1.0 0.5 0.1")  # high enough for the gripper to actually hold it
+
+    actuator = root.find("actuator")
+    obj_vel_x = ET.SubElement(actuator, "velocity")
+    obj_vel_x.set("name", "conveyor_object_vel_x")
+    obj_vel_x.set("joint", "conveyor_object_joint")
+    obj_vel_x.set("gear", "1 0 0 0 0 0")
+    obj_vel_x.set("kv", "50")
+    obj_vel_x.set("ctrlrange", "-1 1")
+    obj_vel_y = ET.SubElement(actuator, "velocity")
+    obj_vel_y.set("name", "conveyor_object_vel_y")
+    obj_vel_y.set("joint", "conveyor_object_joint")
+    obj_vel_y.set("gear", "0 1 0 0 0 0")
+    obj_vel_y.set("kv", "50")
+    obj_vel_y.set("ctrlrange", "-1 1")
+
+    # The "home" keyframe's stored qpos/ctrl lengths must match the model's
+    # nq/nu exactly, or MuJoCo fails to compile. Adding the object's free
+    # joint (+7 qpos: xyz + wxyz quaternion) and 2 velocity actuators (+2
+    # ctrl) means the keyframe authored for the bare panda.xml must be
+    # extended to match -- position/orientation values are the object's own
+    # initial pose (matches the `pos` set above; identity quaternion), and
+    # the 2 extra ctrl values are placeholders immediately overwritten by
+    # ConveyorSceneEnv.reset().
+    keyframe = root.find("keyframe")
+    if keyframe is not None:
+        for key in keyframe.findall("key"):
+            if key.get("name") == _HOME_KEYFRAME:
+                key.set("qpos", key.get("qpos") + " 0.5 -0.3 0.05 1 0 0 0")
+                key.set("ctrl", key.get("ctrl") + " 0 0")
 
     return ET.tostring(root, encoding="unicode")
 
@@ -258,7 +313,9 @@ class ConveyorSceneEnv:
         self.dt = dt
         self.conveyor_velocity = np.asarray(conveyor_velocity, dtype=np.float64)
         self.data = mujoco.MjData(self.model)
-        self._obj_mocap_id = self.model.body("conveyor_object").mocapid[0]
+        self._obj_body_id = self.model.body("conveyor_object").id
+        self._obj_vel_x_id = self.model.actuator("conveyor_object_vel_x").id
+        self._obj_vel_y_id = self.model.actuator("conveyor_object_vel_y").id
         self._arm_ctrlrange = self.model.actuator_ctrlrange[:7].copy()
         # Renderer is (re)created lazily in get_rgbd() sized to whatever
         # width/height is actually requested (mujoco.Renderer has no resize
@@ -291,6 +348,12 @@ class ConveyorSceneEnv:
         self.data.qpos[:7] = _RESET_QPOS
         self.data.qpos[7:9] = 0.04
         self.data.ctrl[7] = 255.0
+        # Conveyor object's velocity actuators (x, y) -- constant for the
+        # whole episode, so set once here rather than every step(). The
+        # object's own free-joint physics (mj_step) carries it at this
+        # commanded velocity from here on; no manual position scripting.
+        self.data.ctrl[self._obj_vel_x_id] = self.conveyor_velocity[0]
+        self.data.ctrl[self._obj_vel_y_id] = self.conveyor_velocity[1]
         mujoco.mj_forward(self.model, self.data)
         self._q_target = self.data.qpos[:7].copy()
         self.data.ctrl[:7] = self._q_target
@@ -302,7 +365,6 @@ class ConveyorSceneEnv:
             self._arm_ctrlrange[:, 1],
         )
         self.data.ctrl[:7] = self._q_target
-        self.data.mocap_pos[self._obj_mocap_id] += self.conveyor_velocity * self.dt
         mujoco.mj_step(self.model, self.data)
 
     def get_rgbd(self, width: int = 128, height: int = 128, camera: str = "wrist_cam"):
@@ -322,7 +384,7 @@ class ConveyorSceneEnv:
         return rgb, depth.astype(np.float32)
 
     def get_object_ground_truth(self) -> np.ndarray:
-        return self.data.mocap_pos[self._obj_mocap_id].copy()
+        return self.data.xpos[self._obj_body_id].copy()
 
     def get_joint_positions(self) -> np.ndarray:
         return self.data.qpos[:7].copy()

@@ -56,13 +56,13 @@ integration debugging (see task-12-report.md for the full narrative):
    conveyor's slow (0.08 m/s) speed relative to the control rate, loses
    negligible accuracy from dropping the lookahead term.
 
-5. A small downward-clearance offset on the Z target. The "hand" frame that
-   `panda_fk_numpy` returns sits well above the gripper fingers (~6cm at a
-   downward-pointing orientation); driving it exactly to the perceived
-   object height puts the open fingers *through* the floor, producing real
-   contact forces (confirmed via `env.data.ncon`/`env.data.contact`) that
-   visibly destabilized the joint trajectory. `_Z_CLEARANCE_M` raises the
-   commanded height slightly to reduce (not fully eliminate) this.
+5. [Superseded by point 8 below -- kept for history.] An earlier version of
+   this loop targeted the *flange* ("hand" frame) and added a downward Z
+   clearance offset to avoid driving the flange (and therefore the fingers,
+   ~10cm below it) into the floor. Now that targeting/gating/reporting all
+   use the TCP (fingertip midpoint) directly, no such offset is needed --
+   targeting the object's own center height is correct, since that's where
+   the fingertips should be to straddle and close around it.
 
 6. `control.mpc.KinematicMPC` gained two additive, backward-compatible
    constructor parameters used here (`posture_target`/`posture_weight` and
@@ -70,23 +70,26 @@ integration debugging (see task-12-report.md for the full narrative):
    why; both default to "off" so every pre-existing caller/test is
    unaffected.
 
-Current, shipped state (post Task 15's final-review correction -- see
-task-15-report.md and Section 12 of the design spec for the full history):
-`configs/conveyor.yaml`'s `grasp.position_tolerance` is **0.075m**, chosen via
-a full deterministic re-sweep as the value that lets `GraspExecutor` commit a
-grasp at true (ground-truth) end-effector-to-object error of **~0.0709m** at
-the commit instant. This is the demonstrated, accepted MVP accuracy --
-`tests/test_integration_conveyor.py` **passes** deterministically against it.
-This is a deliberate, documented trade-off, not the originally-specified
-0.03m target: the grasp gate (`GraspExecutor.should_close`, which fires on
-distance to the *commanded target* -- the live Kalman estimate plus a small
-offset, not ground truth) commits earlier against a looser tolerance, at a
-still-converging point; a tighter tolerance commits later, against a
-more-converged MPC solution, giving a smaller true error, all the way down to
-~0.055m where the gate stops firing within the step budget at all. See
-task-12-report.md, task-13-report.md, task-14-report.md, task-15-report.md,
-and design-spec Section 12 for the full debugging narrative, root causes, and
-what a genuine accuracy improvement would require.
+7. The conveyor object is a real, physically-simulated body (free joint +
+   velocity actuators), not a `mocap` body -- see `sim/conveyor_scene.py`'s
+   module docstring for why. `get_object_ground_truth()`'s underlying
+   representation changed accordingly, but this module's own code is
+   unaffected (it only ever called that method, never touched mocap
+   internals directly).
+
+8. Target discontinuity at the lookahead-to-live-tracking switch, and the
+   flange-vs-TCP frame gap, were both root-caused from a user-visible bug
+   report (the render-mode demo visibly missing the object) rather than
+   from a tuning sweep -- see design spec Section 12 for the full story.
+   Fix (a): the hard switch at `_CLOSE_RANGE_M` (this loop used to jump
+   `target` discontinuously between the lookahead intercept point and the
+   live estimate right at that boundary) is now a continuous blend -- see
+   the `blend` computation below. Fix (b): `ee_pos`/`target`/`grasp_error_m`
+   all now use `panda_tcp_numpy`/`panda_tcp_symbolic` (the fingertip-pad
+   midpoint) instead of `panda_fk_numpy`/`panda_fk_symbolic` (the flange),
+   consistently throughout targeting, gating, and reporting -- previously
+   only the reported metric was flange-based while nothing was TCP-based at
+   all, which Section 11 flagged as a candidate fix; this implements it.
 """
 import time
 
@@ -95,7 +98,7 @@ import numpy as np
 import yaml
 
 from control.mpc import KinematicMPC
-from control.panda_kinematics import panda_fk_numpy, panda_fk_symbolic
+from control.panda_kinematics import panda_tcp_numpy, panda_tcp_symbolic
 from manipulation.grasp import GraspExecutor
 from perception.camera import CameraIntrinsics
 from perception.segment import segment_object_centroid
@@ -114,9 +117,6 @@ EE_MAX_SPEED = 0.2
 # ill-conditioned (see module docstring, point 4); switch to direct live
 # tracking instead.
 _CLOSE_RANGE_M = 0.15
-# Raises the commanded Z target above the perceived object height to reduce
-# (not eliminate) gripper/floor contact -- see module docstring, point 5.
-_Z_CLEARANCE_M = 0.015
 # Extra sim steps held after the gripper-close command, purely so the
 # commanded closing motion actually plays out in the physics (long enough to
 # fully close: fingers take ~200 steps to reach the closed ctrlrange) instead
@@ -170,9 +170,9 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
     q_min = env.model.jnt_range[:7, 0].copy()
     q_max = env.model.jnt_range[:7, 1].copy()
     q_home = env.get_joint_positions().copy()
-    home_ee_xy = panda_fk_numpy(q_home)[:2].copy()
+    home_ee_xy = panda_tcp_numpy(q_home)[:2].copy()
 
-    fk = panda_fk_symbolic()
+    fk = panda_tcp_symbolic()
     mpc_cfg = config["mpc"]
     mpc = KinematicMPC(
         fk_func=fk,
@@ -263,7 +263,7 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
             continue
 
         q_current = env.get_joint_positions()
-        ee_pos = panda_fk_numpy(q_current)
+        ee_pos = panda_tcp_numpy(q_current)
 
         # Hold position until the track is CONFIRMED and the tracked
         # object has drifted (via the conveyor's own motion) close to
@@ -276,18 +276,35 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
                 qdot_cmd = np.zeros(7)
                 continue
 
+        # Blend the lookahead intercept point smoothly into the live
+        # estimate as the arm closes in, instead of hard-switching at
+        # _CLOSE_RANGE_M. The hard switch used to make `target` jump
+        # discontinuously (the lookahead point leads the object by design;
+        # the live estimate doesn't) right at the switch boundary -- the
+        # arm, still catching up toward the pre-switch target, would
+        # overshoot past the object exactly where the switch fired. `blend`
+        # is 1.0 (pure lookahead) far away, 0.0 (pure live estimate) at
+        # zero distance, and linear in between, so `target` now moves
+        # continuously with no jump. See design spec Section 12.
         live_dist = float(np.linalg.norm(ee_pos - track.kf.x[:3]))
-        if status == TrackStatus.CONFIRMED and live_dist > _CLOSE_RANGE_M:
+        live_estimate = track.kf.x[:3].copy()
+        if status == TrackStatus.CONFIRMED:
             intercept = solve_intercept(
                 obj_pos0=track.kf.x[:3],
                 obj_vel=track.kf.x[3:],
                 ee_pos=ee_pos,
                 ee_max_speed=EE_MAX_SPEED,
             )
-            target = (intercept[0] if intercept is not None else track.kf.x[:3]).copy()
+            lookahead_point = intercept[0] if intercept is not None else live_estimate
         else:
-            target = track.kf.x[:3].copy()
-        target[2] += _Z_CLEARANCE_M
+            lookahead_point = live_estimate
+        blend = float(np.clip(live_dist / _CLOSE_RANGE_M, 0.0, 1.0))
+        target = blend * lookahead_point + (1.0 - blend) * live_estimate
+        # No Z clearance added here (see module docstring, point 5): now
+        # that `ee_pos`/`target` are both TCP (fingertip) positions rather
+        # than the flange, targeting the object's own center height is
+        # correct -- the fingertips should be AT that height to straddle
+        # and close around the object, not offset above it.
 
         qdot_cmd = mpc.solve(q_current, target)
 

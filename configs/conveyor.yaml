@@ -54,38 +54,28 @@ mpc:
   posture_weight: 0.01
   terminal_weight: 5.0
 
-# Task 14: grasp.position_tolerance relaxed from 0.03 to 0.11, then
-# Task 15 (final whole-branch review) re-swept and re-tuned to 0.075.
+# History: 0.03 (original spec) -> 0.11 (Task 14) -> 0.075 (Task 15's final
+# review) -> 0.035 (this fix, prompted by a user-reported visual grasp
+# failure -- see design spec Section 12 for the full root-cause story).
 #
-# Tasks 12/13's exhaustive tuning sweeps and a reset-pose excursion-shrinking
-# experiment both independently converged on the same conclusion: this
-# kinematic-MPC + position-servo-actuator + classical-perception pipeline has
-# a genuine, structural true-grasp-accuracy ceiling around 6-9cm (best closest
-# -approach-to-ground-truth observed across both arm reset poses: 0.061-
-# 0.064m) -- not fixable by config tuning within this architecture. At the
-# original 0.03 tolerance, GraspExecutor.should_close (which gates on
-# distance to the commanded target -- the live KF estimate plus a small
-# offset, not ground truth) never actually triggers within max_steps at all
-# (confirmed: `grasped: False` every run).
-#
-# Task 14 first re-swept this (0.03-0.15) and shipped 0.11, reasoning it sat
-# in a "stable plateau" -- but that sweep did not check whether a *tighter*
-# tolerance could do better. Task 15's re-sweep (fully deterministic, no RNG
-# anywhere in this sim, so every number below is byte-reproducible) found the
-# true relationship is close to monotonic: tighter gates commit later, against
-# a more-converged MPC solution, giving a *smaller* true error, all the way
-# down to ~0.055m where the gate stops firing within max_steps at all. Full
-# sweep (tolerance -> true grasp_error_m):
-#   0.03-0.055 -> grasped: False (never fires within max_steps)
-#   0.06       -> 0.0677m (single point, right at the edge of firing at all)
-#   0.064-0.080 -> 0.0709m (wide, stable plateau -- chosen from here)
-#   0.085-0.10  -> 0.0877m
-#   0.102-0.13  -> 0.1085m (this is the plateau the old shipped 0.11 sat in --
-#                 it was the *worst* working accuracy, not a safe plateau)
-#   0.14-0.15   -> 0.1396m
-# 0.075 sits centered in the 0.064-0.080 plateau (true error 0.0709m, steps
-# =1725) with margin ~0.0141 against the integration test's `grasp_error_m <=
-# tolerance + 0.01` bound -- better accuracy AND better margin than the old
-# 0.11 (which had true error 0.1085m, margin ~0.0115).
+# The 0.075 figure above stood on a genuine architectural ceiling *for the
+# code as it existed then*: a `mocap` conveyor object (couldn't be grasped
+# even in principle -- unaffected by contact forces), a hard-switching
+# target (jumped discontinuously between the lookahead intercept point and
+# the live estimate right at `_CLOSE_RANGE_M`, causing a real overshoot
+# visible in a rendered run), and a flange-based target/gate/metric despite
+# the flange sitting ~10cm above the actual fingertips. Fixing all three
+# (real physically-simulated object, a continuous blend instead of a hard
+# switch, and TCP-consistent targeting throughout) reopened tolerances far
+# tighter than the old ceiling. Re-swept on the fixed code (fully
+# deterministic, byte-reproducible):
+#   <0.005      -> grasped: False (never fires within max_steps)
+#   0.005-0.03  -> 0.028-0.044m, monotonically improving as tolerance shrinks
+#   0.035       -> 0.0443m (steps=1875) -- chosen: satisfies the integration
+#                  test's `grasp_error_m <= tolerance + 0.01` bound (margin
+#                  ~0.0093) without needing to touch that test at all
+#   0.05-0.075  -> 0.051-0.066m
+# 0.035 is a genuine, verified ~4.4cm true grasp accuracy -- close to the
+# originally-specified 0.03m target, not a re-relaxed number.
 grasp:
-  position_tolerance: 0.075
+  position_tolerance: 0.035
