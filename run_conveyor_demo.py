@@ -88,6 +88,9 @@ task-12-report.md, task-13-report.md, task-14-report.md, task-15-report.md,
 and design-spec Section 12 for the full debugging narrative, root causes, and
 what a genuine accuracy improvement would require.
 """
+import time
+
+import mujoco.viewer
 import numpy as np
 import yaml
 
@@ -115,15 +118,15 @@ _CLOSE_RANGE_M = 0.15
 # (not eliminate) gripper/floor contact -- see module docstring, point 5.
 _Z_CLEARANCE_M = 0.015
 # Extra sim steps held after the gripper-close command, purely so the
-# commanded closing motion actually plays out in the physics (e.g. for a
-# recorded demo video) instead of the episode returning on the same tick the
-# command is issued. This does not change what's measured/reported --
-# `grasp_error_m` is still the true distance at the commit instant, before
-# these extra steps run. Whether the fingers actually make and hold contact
-# during these steps is not verified anywhere in this pipeline; see Section
-# 12 for why the reported accuracy is a commit-instant distance, not a
-# verified successful grasp.
-_POST_GRASP_SETTLE_STEPS = 20
+# commanded closing motion actually plays out in the physics (long enough to
+# fully close: fingers take ~200 steps to reach the closed ctrlrange) instead
+# of the episode ending on the same tick the command is issued. This does not
+# change what's measured/reported -- `grasp_error_m` is still the true
+# distance at the commit instant, before these extra steps run. Whether the
+# fingers actually make and hold contact during these steps is not verified
+# anywhere in this pipeline; see Section 12 for why the reported accuracy is
+# a commit-instant distance, not a verified successful grasp.
+_POST_GRASP_SETTLE_STEPS = 200
 
 
 def _camera_point_to_world(
@@ -138,13 +141,21 @@ def _camera_point_to_world(
     return cam_pos + cam_mat @ point_local
 
 
-def run_one_episode(config: dict) -> dict:
-    """Run one closed-loop episode."""
+def run_one_episode(config: dict, render: bool = False) -> dict:
+    """Run one closed-loop episode.
+
+    `render=True` opens an interactive MuJoCo viewer window, paces the sim
+    to real time, and -- once the episode ends (grasped or not) -- holds the
+    window open so the final state stays visible until you close it
+    yourself. Purely opt-in: default behavior and every existing caller/test
+    is unaffected.
+    """
     env = ConveyorSceneEnv(
         conveyor_velocity=np.array(config["conveyor_velocity"]),
         dt=config["dt"],
     )
     env.reset()
+    viewer = mujoco.viewer.launch_passive(env.model, env.data) if render else None
 
     cam_cfg = config["camera"]
     fx, fy, cx, cy = env.camera_intrinsics(cam_cfg["width"], cam_cfg["height"])
@@ -187,9 +198,21 @@ def run_one_episode(config: dict) -> dict:
     sim_steps_per_control = max(1, round((1.0 / config["control_hz"]) / config["dt"]))
     qdot_cmd = np.zeros(7)
     moving = False
+    result = None
 
     for step in range(config["max_steps"]):
+        if viewer is not None and not viewer.is_running():
+            result = {"grasped": False, "grasp_error_m": None, "steps": step}
+            break
+
+        step_start = time.perf_counter()
         env.step(qdot_cmd)
+
+        if viewer is not None:
+            viewer.sync()
+            remaining = env.dt - (time.perf_counter() - step_start)
+            if remaining > 0:
+                time.sleep(remaining)
 
         if step % sim_steps_per_control != 0:
             continue
@@ -278,13 +301,33 @@ def run_one_episode(config: dict) -> dict:
             # a recorded demo; grasp_error was already computed above, at
             # the commit instant, and is unaffected by these extra steps.
             for _ in range(_POST_GRASP_SETTLE_STEPS):
+                settle_start = time.perf_counter()
                 env.step(np.zeros(7))
-            return {"grasped": True, "grasp_error_m": grasp_error, "steps": step}
+                if viewer is not None:
+                    viewer.sync()
+                    remaining = env.dt - (time.perf_counter() - settle_start)
+                    if remaining > 0:
+                        time.sleep(remaining)
+            result = {"grasped": True, "grasp_error_m": grasp_error, "steps": step}
+            break
 
-    return {"grasped": False, "grasp_error_m": None, "steps": config["max_steps"]}
+    if result is None:
+        result = {"grasped": False, "grasp_error_m": None, "steps": config["max_steps"]}
+
+    if viewer is not None:
+        # Hold the window open with the final state visible until the user
+        # closes it themselves, instead of the process exiting immediately.
+        while viewer.is_running():
+            viewer.sync()
+            time.sleep(0.02)
+        viewer.close()
+
+    return result
 
 
 if __name__ == "__main__":
+    import sys
+
     with open("configs/conveyor.yaml") as f:
         cfg = yaml.safe_load(f)
-    print(run_one_episode(cfg))
+    print(run_one_episode(cfg, render="--render" in sys.argv))
