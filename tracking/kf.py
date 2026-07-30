@@ -35,14 +35,29 @@ class ConstantVelocityKF:
         self.x = self.F @ self.x
         self.P = self.F @ self.P @ self.F.T + self.Q
 
+    def innovation_distance(self, z: np.ndarray) -> float:
+        """Mahalanobis distance of measurement `z` against the current
+        predicted state, with NO mutation of `self.x`/`self.P`.
+
+        Callers that need to gate a measurement before deciding whether to
+        incorporate it (see `tracking.track.Track.step`) should call this
+        first, and only call `update()` once the measurement has passed the
+        gate -- `update()` always applies the correction unconditionally.
+        """
+        z = np.asarray(z, dtype=np.float64)
+        y = z - self.H @ self.x
+        S = self.H @ self.P @ self.H.T + self.R
+        return float(np.sqrt(y.T @ np.linalg.inv(S) @ y))
+
     def update(self, z: np.ndarray) -> float:
         z = np.asarray(z, dtype=np.float64)
         y = z - self.H @ self.x
         S = self.H @ self.P @ self.H.T + self.R
         K = self.P @ self.H.T @ np.linalg.inv(S)
 
+        mahalanobis = float(np.sqrt(y.T @ np.linalg.inv(S) @ y))
+
         self.x = self.x + K @ y
         self.P = (np.eye(6) - K @ self.H) @ self.P
 
-        mahalanobis = float(np.sqrt(y.T @ np.linalg.inv(S) @ y))
         return mahalanobis

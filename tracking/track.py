@@ -36,9 +36,14 @@ class Track:
 
         hit = False
         if measurement is not None:
-            distance = self.kf.update(measurement)
+            # Compute the gate distance BEFORE touching filter state. A
+            # measurement that fails the gate must have zero effect on
+            # kf.x/kf.P -- only a measurement that passes is incorporated via
+            # the mutating kf.update() call below.
+            distance = self.kf.innovation_distance(measurement)
             if distance <= self.gate_threshold:
                 hit = True
+                self.kf.update(measurement)
 
         self.hit_history.append(hit)
         self.consecutive_misses = 0 if hit else self.consecutive_misses + 1

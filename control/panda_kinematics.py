@@ -3,16 +3,24 @@
 DH parameters below are the widely-published Franka Panda modified-DH
 link parameters (7 revolute joints + fixed flange offset).
 
-Two independent implementations are provided on purpose:
+Two implementations are provided:
   - `panda_fk_symbolic`: builds a CasADi `Function` for use in symbolic
     optimization (e.g. the kinematic MPC in Task 10).
-  - `panda_fk_numpy`: a plain-numpy reference implementation, used only to
+  - `panda_fk_numpy`: a plain-numpy reference implementation, used to
     cross-check the CasADi version in tests.
 
 They are written as two separate, self-contained functions (each with its
-own private per-link transform helper) rather than sharing one
-backend-parameterized helper, so that the two never call into each other and
-an agreement between them is a genuine independent cross-check.
+own private per-link transform helper) so the transform-matrix construction
+logic is never shared -- but both read from the same `_A`/`_ALPHA`/`_D`
+parameter table below, so agreement between them cannot catch a wrong
+literal value in that shared table (only a bug in the per-implementation
+transform math). That exact bug class was found once already (see
+`task-12-report.md`) and slipped past both implementations' agreement at
+`q=0`, where the error happens to cancel out. The actual independent
+cross-check against ground truth is
+`tests/control/test_panda_kinematics.py::test_fk_numpy_matches_mujoco_conveyor_scene_hand_body`,
+which compares `panda_fk_numpy` against the real, independently-authored
+MuJoCo model's compiled body position.
 """
 import casadi as ca
 import numpy as np

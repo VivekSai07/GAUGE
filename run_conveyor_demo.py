@@ -70,22 +70,23 @@ integration debugging (see task-12-report.md for the full narrative):
    why; both default to "off" so every pre-existing caller/test is
    unaffected.
 
-Current, shipped state (post Task 14 -- see task-14-report.md and Section 12
-of the design spec for the full history): `configs/conveyor.yaml`'s
-`grasp.position_tolerance` is **0.11m**, chosen via an empirical sweep as the
-value that reliably lets `GraspExecutor` commit a grasp at true (ground-truth)
-end-effector-to-object error of **~0.108m** at the commit instant. This is the
-demonstrated, accepted MVP accuracy -- `tests/test_integration_conveyor.py`
-**passes** deterministically against it. This is a deliberate, documented
-trade-off, not the originally-specified 0.03m target: Tasks 12-13's tuning
-sweeps found the *closest approach* the arm ever reaches to the object over a
-full episode floors around ~6-9cm regardless of tuning, but the grasp gate
-(`GraspExecutor.should_close`, which fires on distance to the live Kalman
-*estimate*, not ground truth) does not actually commit at that closest-approach
-instant -- it commits earlier, at a still-converging point, landing at the
-somewhat larger ~0.108m figure above. See task-12-report.md, task-13-report.md,
-task-14-report.md, and design-spec Section 12 for the full debugging
-narrative, root causes, and what a genuine accuracy improvement would require.
+Current, shipped state (post Task 15's final-review correction -- see
+task-15-report.md and Section 12 of the design spec for the full history):
+`configs/conveyor.yaml`'s `grasp.position_tolerance` is **0.075m**, chosen via
+a full deterministic re-sweep as the value that lets `GraspExecutor` commit a
+grasp at true (ground-truth) end-effector-to-object error of **~0.0709m** at
+the commit instant. This is the demonstrated, accepted MVP accuracy --
+`tests/test_integration_conveyor.py` **passes** deterministically against it.
+This is a deliberate, documented trade-off, not the originally-specified
+0.03m target: the grasp gate (`GraspExecutor.should_close`, which fires on
+distance to the *commanded target* -- the live Kalman estimate plus a small
+offset, not ground truth) commits earlier against a looser tolerance, at a
+still-converging point; a tighter tolerance commits later, against a
+more-converged MPC solution, giving a smaller true error, all the way down to
+~0.055m where the gate stops firing within the step budget at all. See
+task-12-report.md, task-13-report.md, task-14-report.md, task-15-report.md,
+and design-spec Section 12 for the full debugging narrative, root causes, and
+what a genuine accuracy improvement would require.
 """
 import numpy as np
 import yaml
@@ -113,6 +114,16 @@ _CLOSE_RANGE_M = 0.15
 # Raises the commanded Z target above the perceived object height to reduce
 # (not eliminate) gripper/floor contact -- see module docstring, point 5.
 _Z_CLEARANCE_M = 0.015
+# Extra sim steps held after the gripper-close command, purely so the
+# commanded closing motion actually plays out in the physics (e.g. for a
+# recorded demo video) instead of the episode returning on the same tick the
+# command is issued. This does not change what's measured/reported --
+# `grasp_error_m` is still the true distance at the commit instant, before
+# these extra steps run. Whether the fingers actually make and hold contact
+# during these steps is not verified anywhere in this pipeline; see Section
+# 12 for why the reported accuracy is a commit-instant distance, not a
+# verified successful grasp.
+_POST_GRASP_SETTLE_STEPS = 20
 
 
 def _camera_point_to_world(
@@ -128,6 +139,7 @@ def _camera_point_to_world(
 
 
 def run_one_episode(config: dict) -> dict:
+    """Run one closed-loop episode."""
     env = ConveyorSceneEnv(
         conveyor_velocity=np.array(config["conveyor_velocity"]),
         dt=config["dt"],
@@ -162,7 +174,15 @@ def run_one_episode(config: dict) -> dict:
         posture_weight=mpc_cfg.get("posture_weight", 0.0),
         terminal_weight=mpc_cfg.get("terminal_weight", 0.0),
     )
-    grasp_executor = GraspExecutor(position_tolerance=config["grasp"]["position_tolerance"])
+    grasp_executor = GraspExecutor(
+        position_tolerance=config["grasp"]["position_tolerance"],
+        # Optional covariance-gated commit (design spec Section 2/3.4's core
+        # novelty axis) -- off by default (None) unless configs/conveyor.yaml
+        # sets `grasp.cov_threshold`, so the shipped, already-tuned accuracy
+        # figures in Section 12 are completely unaffected unless someone
+        # deliberately opts in.
+        cov_threshold=config["grasp"].get("cov_threshold"),
+    )
 
     sim_steps_per_control = max(1, round((1.0 / config["control_hz"]) / config["dt"]))
     qdot_cmd = np.zeros(7)
@@ -222,9 +242,9 @@ def run_one_episode(config: dict) -> dict:
         q_current = env.get_joint_positions()
         ee_pos = panda_fk_numpy(q_current)
 
-        # Hold position until the track is CONFIRMED and the tracked object
-        # has drifted (via the conveyor's own motion) close to the arm's
-        # reachable footprint -- see module docstring, point 3.
+        # Hold position until the track is CONFIRMED and the tracked
+        # object has drifted (via the conveyor's own motion) close to
+        # the arm's reachable footprint -- see module docstring, point 3.
         xy_dist_to_home = float(np.linalg.norm(track.kf.x[:2] - home_ee_xy))
         if not moving:
             if status == TrackStatus.CONFIRMED and xy_dist_to_home < _CLOSE_RANGE_M:
@@ -248,10 +268,17 @@ def run_one_episode(config: dict) -> dict:
 
         qdot_cmd = mpc.solve(q_current, target)
 
-        if grasp_executor.should_close(ee_pos, target, status):
+        if grasp_executor.should_close(ee_pos, target, status, covariance=track.kf.P):
             env.set_gripper(closed=True)
             true_obj_pos = env.get_object_ground_truth()
             grasp_error = float(np.linalg.norm(ee_pos - true_obj_pos))
+            # Hold the closing command for a few more sim steps so the
+            # gripper's commanded closing motion actually plays out in the
+            # physics (see _POST_GRASP_SETTLE_STEPS) -- purely cosmetic for
+            # a recorded demo; grasp_error was already computed above, at
+            # the commit instant, and is unaffected by these extra steps.
+            for _ in range(_POST_GRASP_SETTLE_STEPS):
+                env.step(np.zeros(7))
             return {"grasped": True, "grasp_error_m": grasp_error, "steps": step}
 
     return {"grasped": False, "grasp_error_m": None, "steps": config["max_steps"]}

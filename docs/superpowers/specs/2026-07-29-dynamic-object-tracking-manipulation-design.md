@@ -58,6 +58,17 @@ point-tracking commits early and mis-grasps near high-uncertainty regions
 camera-path optimization (trading interception speed for keeping the object
 in frame), multi-object tracking/grasping, unknown/arbitrary trajectories.
 
+**What actually shipped vs. what this section describes (Task 15 correction):**
+m/n-confirmed track gating is implemented and active (`TrackStatus.CONFIRMED`
+is required by `GraspExecutor` whenever `confidence_required=True`, the
+default). A covariance-threshold gate on the grasp-commit decision was added
+in Task 15 (`GraspExecutor(cov_threshold=...)`, gating on
+`trace(track.kf.P[:3,:3])`) — but it is **off by default**
+(`cov_threshold=None`) and the shipped `configs/conveyor.yaml` does not
+enable it, so it has no effect on the demonstrated Section 12 accuracy
+figures. The MPC-cost covariance-weighting described above was never
+implemented — see Section 11.
+
 **MVP target sequencing:**
 1. **Conveyor belt** (constant-velocity, linear KF) first — gets the full
    pipeline working end-to-end quickly (an early working demo matters for
@@ -280,43 +291,91 @@ ReflexGrasp, ClosedLoopCatch.
   flange (`hand`) frame — the pipeline currently commands and measures the
   flange throughout, ~0.10m from the actual fingertip contact point; see
   Section 12 for why this is not a simple offset fix
+- `prediction.predict.propagate()` (Section 3.3) is fully built and tested
+  but is not imported or called anywhere in `run_conveyor_demo.py` — the
+  MVP's closed-form constant-velocity interception solve
+  (`planning.intercept.solve_intercept`) doesn't need step-wise state/
+  covariance propagation to compute a rendezvous point, so the live loop
+  never calls it. Reserved for the pendulum follow-on, where a nonlinear,
+  non-closed-form trajectory genuinely needs multi-step propagation to plan
+  an interception point.
+- MPC-cost covariance-weighting (Section 2's original novelty framing: "the
+  MPC cost is covariance-weighted") was never implemented. What did ship
+  (Task 15) is a covariance-*threshold gate* on the grasp-commit decision
+  (`GraspExecutor(cov_threshold=...)`, tested, but off by default and not
+  enabled in `configs/conveyor.yaml`) — a strictly simpler mechanism than
+  weighting the MPC's cost function by estimate uncertainty, which remains
+  unbuilt.
 
 ## 12. Demonstrated Accuracy & Known Limitation
 
-**Achieved real grasp accuracy: ~10.8cm** true (ground-truth) end-effector-
+**Achieved real grasp accuracy: ~7.1cm** true (ground-truth) end-effector-
 to-object error **at the instant `GraspExecutor` actually commits the grasp**
 — this is the number the shipped system delivers, measured directly against
 `env.get_object_ground_truth()` (not the perception/tracking estimate), and
 it is what `tests/test_integration_conveyor.py` verifies passes with margin
-at the shipped `grasp.position_tolerance: 0.11`. This, not the closest-
-approach figure below, is the MVP's headline, honest, demonstrated result —
-not the originally-specified `grasp.position_tolerance: 0.03` (3cm) target.
+at the shipped `grasp.position_tolerance: 0.075`. This is the MVP's headline,
+honest, demonstrated result — not the originally-specified `grasp.
+position_tolerance: 0.03` (3cm) target, and (per Task 15's correction below)
+also not the ~10.8cm figure a prior task revision of this section reported.
+Note this is a *commit-instant distance*, not a verified successful grasp:
+`run_conveyor_demo.py` commands the gripper closed and holds a few more
+simulation steps so the motion visibly plays out, but nothing in this
+pipeline verifies the fingers actually make and hold contact (no check on
+`env.data.ncon`/`env.data.contact` after closing) — closing the loop on
+verified grasp completion, not just commit-instant distance, would be a
+reasonable addition alongside the other Section 11 future-work items.
 
-A separate, smaller number appears throughout Tasks 12-13's reports and is
-easy to mistake for the achieved result: **~6-9cm** is the closest true
-distance the end-effector *ever reaches* to the object over a full episode
-(0.061m at Task 12's `home`-keyframe reset pose, 0.064m at Task 13's
-shrunk-excursion `_RESET_QPOS`) — but at the original 0.03 tolerance that
-this figure was measured under, `GraspExecutor.should_close` **never actually
-fires** within the step budget (`grasped: False` on every run). No grasp is
-committed at that 6-9cm figure; it is the best-case approach distance the
-system reaches but declines to act on, not a delivered result. The system
-only ever actually grasps at the looser, shipped 0.11 tolerance, and only at
-the larger ~10.8cm error described above.
+A separate, smaller number appears throughout Tasks 12-13's reports: **~6-9cm**
+is the closest true distance the end-effector *ever reaches* to the object
+over a full episode (0.061m at Task 12's `home`-keyframe reset pose, 0.064m
+at Task 13's shrunk-excursion `_RESET_QPOS`). This is close to, but distinct
+from, the achieved grasp-commit accuracy above — it is the best-case approach
+distance a trajectory reaches at *some* point, whether or not a grasp is
+committed there.
 
-**Task 14's key empirical finding, and why 10.8cm ≠ 6-9cm:**
+**Task 15's correction to this section (final whole-branch review):** an
+earlier revision of this section shipped `grasp.position_tolerance: 0.11`
+and described it as sitting in a "stable plateau," with the ~6-9cm
+closest-approach figure characterized as a distance the system "declines to
+act on." That framing was wrong, and falsifiable by re-running the sweep:
+0.11 was not a plateau to rest on, it was the *worst* accuracy among the
+tolerances that actually grasp at all. A full re-sweep (0.03m-0.15m, fully
+deterministic — this simulation has no randomness anywhere, so every number
+below is exactly reproducible) found:
+
+| tolerance | grasped | true error at commit |
+|---|---|---|
+| 0.03 - 0.055 | False (never fires within `max_steps`) | — |
+| 0.06 | True | 0.0677m |
+| 0.064 - 0.080 | True | 0.0709m |
+| 0.085 - 0.10 | True | 0.0877m |
+| 0.102 - 0.13 (old shipped 0.11) | True | 0.1085m |
+| 0.14 - 0.15 | True | 0.1396m |
+
+The relationship is close to monotonic: a **tighter** gate commits *later*,
+against a more-converged MPC solution, giving a *smaller* true error — all
+the way down to ~0.055m, where the gate stops firing within the step budget
+entirely. There is no "boundary between closest-approach and committed-grasp"
+to speak of; there is a monotonic accuracy/commit-time trade-off, and the old
+0.11 setting sat needlessly far on the wrong side of it. `grasp.
+position_tolerance` is now **0.075m**, centered in the wide 0.064-0.080m
+plateau (true error 0.0709m, step 1725, byte-reproducible), which beats the
+old 0.11 setting on both accuracy (7.1cm vs. 10.85cm) and margin against the
+integration test's `grasp_error_m <= tolerance + 0.01` bound (~0.0141 vs.
+~0.0115).
+
+**Why `position_tolerance` controls more than whether a grasp is attempted:**
 `GraspExecutor.should_close` gates the grasp-commit instant on distance to
-the live Kalman-filter *estimate*, not ground truth, so `grasp.
-position_tolerance` controls not only whether a grasp is ever attempted but
-*when* — a looser gate commits earlier, against a less-converged MPC
-solution, which increases the true error at the commit instant relative to
-the closest approach the same trajectory would eventually reach. A
-fine-grained sweep (0.03–0.15m, all fully deterministic — this simulation has
-no randomness anywhere) found a stable plateau from ~0.098m to ~0.114m where
-the gate reliably commits at true error 0.108m (step 1675, byte-
-reproducible); `grasp.position_tolerance` is set to **0.11m** as the point in
-that plateau with safety margin on both sides. See `task-14-report.md` for
-the full sweep.
+the *commanded target* (the live Kalman-filter estimate plus a small Z-
+clearance offset, or — on the long-range leg of the approach — the
+`solve_intercept` lookahead point; see `run_one_episode`'s `target`
+computation), not ground truth. So `grasp.position_tolerance` controls not
+only whether a grasp is ever attempted but *when* — a looser gate commits
+earlier, against a less-converged MPC solution, which increases the true
+error at the commit instant relative to the closest approach the same
+trajectory would eventually reach. See `task-14-report.md` and
+`task-15-report.md` for the full sweeps.
 
 **Why the gap exists:**
 1. **Kinematic-only MPC vs. real position-servo dynamics.** `control/mpc.py`'s
@@ -351,12 +410,16 @@ the full sweep.
    discover the bias, this cut the mean per-measurement residual from
    ~0.0205m (with a +0.0196m Z-axis mean, i.e. almost entirely the top-face
    bias) to ~0.0095m (Z-axis mean ~-0.0004m, i.e. the systematic component is
-   gone; what remains is genuine, unbiased, sub-centimeter x/y noise). This
-   perception improvement does not, on its own, move the headline ~10.8cm
-   grasp-commit figure above by a meaningful amount — the flange/TCP offset
-   (item 3 below) and the kinematic-MPC/real-actuator-dynamics mismatch
-   (item 1 above) dominate the remaining gap — but it is a genuine, verified
-   fix to a previously-mischaracterized error source, and it should not be
+   gone; what remains is genuine, unbiased, sub-centimeter x/y noise). At the
+   time this fix landed (Task 14), it was assessed as not moving the headline
+   grasp-commit figure by a meaningful amount — but that assessment was made
+   without re-optimizing `grasp.position_tolerance` afterward, at the old,
+   now-known-suboptimal 0.11 setting. Task 15's correction above shows that
+   once `position_tolerance` is re-swept post-fix, the achievable accuracy
+   moves down substantially, from 0.1085m to 0.0709m (a ~35% reduction) — so
+   this perception fix *did* matter, it just wasn't visible until paired with
+   re-tuning the tolerance that gates on it. It is a genuine, verified fix to
+   a previously-mischaracterized error source, and it should not be
    re-introduced or re-described as "noise" in future work on this pipeline.
 3. **The flange (`hand`) frame, not the fingertip/TCP, is what is commanded,
    gated on, and reported throughout this pipeline — undisclosed until now.**
@@ -368,7 +431,7 @@ the full sweep.
    and larger than, the ~6cm hand-to-finger-*body*-origin figure noted in
    `task-12-report.md`'s finding #8, which measured to the finger body's
    joint origin rather than the pad tip). Every accuracy number in this
-   section — the ~10.8cm headline, the 6-9cm closest-approach figure, and the
+   section — the ~7.1cm headline, the 6-9cm closest-approach figure, and the
    tolerance sweep — is stated in terms of this flange frame, not the TCP
    where contact actually happens. This is a specific, nameable contributor
    to the reported gap, distinct from (2) above, and it is **not** a cheap
