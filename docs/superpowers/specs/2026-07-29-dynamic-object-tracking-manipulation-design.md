@@ -293,10 +293,19 @@ ReflexGrasp, ClosedLoopCatch.
   `panda_tcp_symbolic` in `control/panda_kinematics.py`), prompted by a
   user-reported visual grasp failure. Kept here struck through rather than
   deleted so the history is legible.
-- Verified grasp *completion* (not just commit-instant distance) — checking
-  `env.data.ncon`/`env.data.contact` after the gripper closes to confirm the
-  fingers actually make and hold contact, rather than only measuring
-  distance at the commit instant. Still not implemented.
+- **[Implemented — see Section 12, "Round 3"]** Verified grasp *completion*
+  (not just commit-instant distance) was listed here as future work; it has
+  since been implemented (`ConveyorSceneEnv.is_grasped()`, both fingers
+  simultaneously in contact via MuJoCo's contact array), prompted by the
+  same user report that motivated Round 3. `tests/test_integration_conveyor.py`
+  now asserts `contact_verified` directly. Kept here struck through rather
+  than deleted so the history is legible. What's still not covered: holding
+  the grasp through any *subsequent* motion (e.g. lifting/carrying the
+  object away) — only a sustained static hold post-commit is verified.
+- Full end-to-end "place" behavior (carrying the grasped object to a drop
+  location) — this MVP's scope was always "pick" (grasp commit + verified
+  hold), not pick-*and*-place to a destination; a "place" phase was never
+  specified or built.
 - `prediction.predict.propagate()` (Section 3.3) is fully built and tested
   but is not imported or called anywhere in `run_conveyor_demo.py` — the
   MVP's closed-form constant-velocity interception solve
@@ -566,24 +575,115 @@ version of the same "structural ceiling":
    removed entirely — targeting the object's own center height is now
    correct, since that's where the fingertips should be.
 
-**Result:** a full deterministic re-sweep of `grasp.position_tolerance` on
-the fixed code found the achievable accuracy is dramatically better than the
-~6-9cm figure believed structural above — down to a floor around 2.8cm
-(where the gate stops firing reliably), with **0.035 chosen as the shipped
-value: ~4.4cm true fingertip-to-object accuracy**, close to the originally-
-specified 0.03m target. See `configs/conveyor.yaml`'s comment for the full
-sweep table. All 47 tests pass, `uv run python run_conveyor_demo.py`
-reproduces the same result byte-for-byte across repeated runs (fully
-deterministic, no randomness anywhere in this simulation).
+**Result (at the time — see "Round 3" below for the correction):** a full
+deterministic re-sweep of `grasp.position_tolerance` on the fixed code found
+the achievable accuracy is dramatically better than the ~6-9cm figure
+believed structural above — down to a floor around 2.8cm (where the gate
+stops firing reliably), with **0.035 chosen as the shipped value: ~4.4cm
+true fingertip-to-object accuracy**, close to the originally-specified 0.03m
+target. See `configs/conveyor.yaml`'s comment for the full sweep table. All
+47 tests pass, `uv run python run_conveyor_demo.py` reproduces the same
+result byte-for-byte across repeated runs (fully deterministic, no
+randomness anywhere in this simulation).
 
 **What this does and doesn't mean:** the operational-space/impedance-control
 and active-vision-reacquisition items above are still real, unimplemented
-future work — closing the gap didn't require either of them in the end. The
-lesson is less "the architecture was fine all along" and more "a tuning
-sweep against a single aggregate metric can converge on a local optimum and
-mistake it for a structural ceiling, when the actual problem is a specific,
-fixable mechanism (a discontinuity, a wrong reference frame, a body that
-can't physically be grasped) that a sweep alone will never surface." All
-three fixes here came from watching the system run and tracing a concrete,
-reproducible failure back to its mechanism — not from trying more
-combinations of the same knobs.
+future work. The lesson is less "the architecture was fine all along" and
+more "a tuning sweep against a single aggregate metric can converge on a
+local optimum and mistake it for a structural ceiling, when the actual
+problem is a specific, fixable mechanism ... that a sweep alone will never
+surface." All three fixes here came from watching the system run and tracing
+a concrete, reproducible failure back to its mechanism — not from trying
+more combinations of the same knobs.
+
+**Correction: this "Result" was itself premature.** Despite the accuracy
+number improving, the user reported after actually watching a rendered
+episode that the Franka *still never picked up the cube* — the ~4.4cm
+figure, and the "grasped: True" it was gated on, were both still only a
+commit-instant *distance* check, never a check that anything was physically
+held. See "Round 3" immediately below for what that distance-only metric
+was hiding, and the fixes that made the grasp physically real.
+
+---
+
+## Round 3: the grasp was never physically real (a distance metric said it was)
+
+Round 2 improved `grasp_error_m` substantially and, from the numbers alone,
+looked like a closed case. Watching `--render` immediately showed otherwise:
+the gripper closed near the object but never picked it up. Root-caused with
+`systematic-debugging` (direct instrumentation, not another tuning pass),
+plus a pattern comparison against a working reference the user pointed to
+(`github.com/VivekSai07/robot-manipulation-playground`, which has a proven
+IK controller and vision pipeline for this exact class of task). Three
+separate, real problems, found in sequence as each was fixed:
+
+1. **No orientation control at all.** `KinematicMPC` minimized TCP position
+   error only. Direct instrumentation (logging the object's position
+   expressed in the gripper's own local frame, `rotation.T @ (object -
+   tcp)`, across a full episode) found the object sitting well-centered in
+   *aggregate* 3D distance but consistently offset **~3cm along the
+   gripper's local X axis** — and closing the fingers (which move only
+   along local Y, confirmed empirically and by a ground-truth test against
+   `env.data.xpos`) cannot correct an X-axis offset at all. A close TCP
+   distance was therefore compatible with the object never being between
+   the fingers.
+
+   This is exactly the class of problem the user's reference repo's
+   `ik_controller_m2.py` solves: full 6D pose (position + orientation)
+   tracking via Jacobian-based differential IK (Pinocchio FK/Jacobians,
+   damped least squares, nullspace projection), rather than position-only
+   tracking. Rather than adopting Pinocchio (a dependency this project
+   deliberately avoided from the start — Section 1's Windows/low-C++
+   constraints), the same effect was added within the existing CasADi
+   stack: `control/panda_kinematics.py` gained `panda_tcp_pose_symbolic`/
+   `panda_tcp_pose_numpy`, exposing the gripper's full orientation (not
+   just position) — including discovering and correcting a fixed 45°
+   rotation between this project's DH-derived flange frame and MuJoCo's
+   own "hand"-frame convention (a well-known Franka Panda quirk, verified
+   fixed to <1e-7 across different arm configurations). `control/mpc.py`
+   gained `pose_fk_func`/`lateral_axis_weight`: an additive, opt-in cost
+   term penalizing the target's offset specifically along the gripper's
+   local X axis. `configs/conveyor.yaml`'s `mpc.lateral_axis_weight: 25.0`
+   enables it.
+
+2. **The conveyor object's velocity actuators never stopped.** Found
+   independently of (1): `sim/conveyor_scene.py`'s `reset()` sets the
+   object's commanded velocity once and nothing ever zeroes it — so even a
+   mechanically perfect grasp was fighting the object's own actuator
+   forever (confirmed by instrumentation: object position continuing to
+   drift under its commanded velocity, opposed by gripper contact forces,
+   long after the gripper had closed). Fixed with a new
+   `ConveyorSceneEnv.stop_conveyor_object()`, called the instant
+   `run_conveyor_demo.py` commits a grasp.
+
+3. **Grip friction was too low to hold the object against gravity.** After
+   (1) and (2), a real, direct contact check —
+   `ConveyorSceneEnv.is_grasped()`, both fingers simultaneously in contact
+   via MuJoCo's own contact array, the same pattern as the reference repo's
+   `grasp_controller.py::is_grasped` — registered `True` only briefly
+   before flipping back to `False`: the object was visibly slipping
+   downward and out of the closed gripper under gravity. Raising the
+   object's tangential friction coefficient from 1.0 to 3.0
+   (`sim/conveyor_scene.py`) fixed this — verified via a long-hold check
+   (1000 post-grasp settle steps, not just the normal
+   `_POST_GRASP_SETTLE_STEPS`) that contact now holds `True` for a
+   sustained ~0.6 second window, not an instant.
+
+**Result:** `run_one_episode()`'s return value gained a `contact_verified`
+field, and `tests/test_integration_conveyor.py` now asserts it directly —
+the test can no longer pass on distance alone. Verified deterministic and
+reproducible across repeated runs:
+`{'grasped': True, 'grasp_error_m': ~0.039, 'steps': 2025, 'contact_verified': True}`.
+All 53 tests pass (up from 47 — new coverage: pose-FK ground-truth checks,
+the lateral-axis-weight cost effect, `stop_conveyor_object`, and both
+`is_grasped` cases).
+
+**What this round actually demonstrates, for anyone reading this history:**
+a scalar accuracy metric — however honestly reported, however thoroughly
+swept — is not the same claim as "the thing works." Round 2's ~4.4cm number
+was real and correctly measured, and still described a system that had
+never once picked anything up, because nothing was checking the property
+that actually mattered (physical contact, sustained). The fix was not "sweep
+harder" a third time; it was watching the system run, and — critically —
+consulting a second, independent, *working* implementation of the same
+problem class rather than re-deriving a fix from first principles alone.

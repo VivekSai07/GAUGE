@@ -27,6 +27,8 @@ class KinematicMPC:
         posture_target: np.ndarray | None = None,
         posture_weight: float = 0.0,
         terminal_weight: float = 0.0,
+        pose_fk_func: ca.Function | None = None,
+        lateral_axis_weight: float = 0.0,
     ):
         """
         ``posture_target``/``posture_weight`` (Task 12 integration finding,
@@ -58,6 +60,24 @@ class KinematicMPC:
         the end of the horizon (subject to the same qdot_max/joint-limit
         constraints), which is what removed the steady-state offset in
         practice.
+
+        ``pose_fk_func``/``lateral_axis_weight`` (found via a user-reported
+        visual grasp failure, additive and backward-compatible: `None`/0.0
+        keeps the original behavior): a *position-only* Cartesian cost gets
+        the TCP close to the target in aggregate 3D distance, but does
+        nothing to ensure the object is *centered along the gripper's
+        finger-closing axis* -- the fingers only move along one local axis
+        (empirically, local Y; see `panda_tcp_pose_symbolic`), and closing
+        them cannot correct any offset along the perpendicular local X axis.
+        Direct instrumentation of a full episode found exactly this: the
+        object sat ~3cm offset along local X even as the fingers closed
+        fully, so nothing was actually captured between them. `pose_fk_func`
+        (e.g. `panda_tcp_pose_symbolic()`) supplies both TCP position and
+        the gripper's orientation; when `lateral_axis_weight > 0`, an extra
+        cost term penalizes the target's offset along the gripper's local X
+        axis specifically, biasing the solver toward a wrist orientation
+        that actually centers the object between the fingers, not just
+        near the TCP in aggregate distance.
         """
         self.horizon = horizon
         self.dt = dt
@@ -81,6 +101,11 @@ class KinematicMPC:
                 cost += posture_weight * ca.sumsqr(Q[:, k + 1] - posture_target)
             if k == horizon - 1 and terminal_weight > 0.0:
                 cost += terminal_weight * ca.sumsqr(ee_pos - target_param)
+            if pose_fk_func is not None and lateral_axis_weight > 0.0:
+                pose_pos, pose_rot = pose_fk_func(Q[:, k + 1])
+                lateral_axis = pose_rot[:, 0]
+                lateral_offset = ca.dot(lateral_axis, pose_pos - target_param)
+                cost += lateral_axis_weight * lateral_offset**2
 
         opti.minimize(cost)
         # print_level=0 + sb="yes" suppresses IPOPT's banner/iteration log;

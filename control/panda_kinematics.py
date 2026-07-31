@@ -55,6 +55,17 @@ _FLANGE_A, _FLANGE_ALPHA, _FLANGE_D = 0.0, 0.0, 0.107
 # floating-point precision (<1e-16 m) across two very different arm
 # configurations, so it is safe to treat as a fixed constant here.
 _TCP_OFFSET_Z = 0.1029
+# Fixed rotation about the flange's local Z axis needed to make this DH
+# chain's rotation MATCH MuJoCo's "hand" body orientation convention exactly
+# (a well-known Franka Panda quirk: the DH-derived flange/K frame and the
+# "hand" frame used by the gripper differ by a fixed 45-degree twist about
+# the approach axis). Verified empirically: R_dh.T @ hand_xmat equals
+# exactly this rotation (to <1e-7) at two very different arm configurations,
+# so it is safe to treat as a fixed constant. Needed for any orientation-
+# aware use of this FK (e.g. `panda_tcp_pose_symbolic` below) -- position
+# alone (`panda_fk_*`/`panda_tcp_*` above) does not need this correction,
+# since it doesn't depend on the frame's rotational convention at all.
+_HAND_FRAME_Z_ROTATION = -np.pi / 4
 
 
 def _dh_transform_ca(a: float, alpha: float, d: float, theta: ca.SX) -> ca.SX:
@@ -94,6 +105,30 @@ def panda_tcp_symbolic() -> ca.Function:
     return ca.Function("panda_tcp", [q], [tcp_pos])
 
 
+def panda_tcp_pose_symbolic() -> ca.Function:
+    """Return a CasADi Function mapping q (7,) to (tcp_pos(3,), rotation(3,3)),
+    where `rotation`'s columns are the gripper's local X/Y/Z axes expressed
+    in world coordinates, in MuJoCo's "hand"-frame convention (see
+    `_HAND_FRAME_Z_ROTATION`). Empirically, the gripper's fingers close
+    along the local **Y** axis (rotation[:, 1]) and open/close motion does
+    not move the object's offset along the local **X** axis (rotation[:, 0])
+    at all -- so an object offset along local X is one the gripper can never
+    correct by closing, regardless of how close the TCP position is
+    overall. `control/mpc.py` uses `rotation[:, 0]` to penalize exactly that
+    offset.
+    """
+    q = ca.SX.sym("q", 7)
+    T = ca.SX.eye(4)
+    for i in range(7):
+        T = T @ _dh_transform_ca(_A[i], _ALPHA[i], _D[i], q[i])
+    T = T @ _dh_transform_ca(_FLANGE_A, _FLANGE_ALPHA, _FLANGE_D, 0.0)
+    T = T @ _dh_transform_ca(0.0, 0.0, 0.0, _HAND_FRAME_Z_ROTATION)
+    rotation = T[0:3, 0:3]
+    T = T @ _dh_transform_ca(0.0, 0.0, _TCP_OFFSET_Z, 0.0)
+    tcp_pos = T[0:3, 3]
+    return ca.Function("panda_tcp_pose", [q], [tcp_pos, rotation])
+
+
 def _dh_transform_np(a: float, alpha: float, d: float, theta: float) -> np.ndarray:
     """Modified-DH homogeneous transform, pure-numpy version."""
     ct, st = np.cos(theta), np.sin(theta)
@@ -126,3 +161,16 @@ def panda_tcp_numpy(q: np.ndarray) -> np.ndarray:
     T = T @ _dh_transform_np(_FLANGE_A, _FLANGE_ALPHA, _FLANGE_D, 0.0)
     T = T @ _dh_transform_np(0.0, 0.0, _TCP_OFFSET_Z, 0.0)
     return T[0:3, 3]
+
+
+def panda_tcp_pose_numpy(q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Pure-numpy reference: q (7,) -> (tcp_pos(3,), rotation(3,3)), matching
+    MuJoCo's "hand"-frame rotation convention -- see `panda_tcp_pose_symbolic`."""
+    T = np.eye(4)
+    for i in range(7):
+        T = T @ _dh_transform_np(_A[i], _ALPHA[i], _D[i], q[i])
+    T = T @ _dh_transform_np(_FLANGE_A, _FLANGE_ALPHA, _FLANGE_D, 0.0)
+    T = T @ _dh_transform_np(0.0, 0.0, 0.0, _HAND_FRAME_Z_ROTATION)
+    rotation = T[0:3, 0:3].copy()
+    T = T @ _dh_transform_np(0.0, 0.0, _TCP_OFFSET_Z, 0.0)
+    return T[0:3, 3], rotation

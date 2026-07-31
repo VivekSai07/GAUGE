@@ -5,6 +5,8 @@ from control.panda_kinematics import (
     panda_fk_numpy,
     panda_tcp_symbolic,
     panda_tcp_numpy,
+    panda_tcp_pose_symbolic,
+    panda_tcp_pose_numpy,
 )
 from sim.conveyor_scene import ConveyorSceneEnv
 
@@ -109,3 +111,46 @@ def test_tcp_numpy_matches_mujoco_fingertip_pad_midpoint():
         mj_tcp = (env.data.geom_xpos[lf_pad_geom_id] + env.data.geom_xpos[rf_pad_geom_id]) / 2.0
         tcp_pos = panda_tcp_numpy(q)
         np.testing.assert_allclose(tcp_pos, mj_tcp, atol=1e-6)
+
+
+def test_casadi_tcp_pose_matches_independent_numpy_tcp_pose():
+    pose_fn = panda_tcp_pose_symbolic()
+    rng = np.random.default_rng(17)
+    for q in [np.zeros(7)] + [rng.uniform(-1.5, 1.5, size=7) for _ in range(5)]:
+        casadi_pos, casadi_rot = pose_fn(q)
+        numpy_pos, numpy_rot = panda_tcp_pose_numpy(q)
+        np.testing.assert_allclose(np.array(casadi_pos).flatten(), numpy_pos, atol=1e-6)
+        np.testing.assert_allclose(np.array(casadi_rot), numpy_rot, atol=1e-6)
+
+
+def test_tcp_pose_numpy_matches_mujoco_hand_orientation():
+    """Ground-truth cross-check: panda_tcp_pose_numpy's rotation must
+    reproduce MuJoCo's real compiled "hand" body orientation (env.data.xmat),
+    not just an assumed correction -- same discipline as the position
+    checks above. Also verifies the empirical claim `panda_tcp_pose_symbolic`
+    documents: the finger-closing direction (right_finger body - left_finger
+    body, in world coordinates) is exactly the local Y axis (rotation[:, 1])
+    of the returned rotation, at every configuration tested."""
+    env = ConveyorSceneEnv(conveyor_velocity=np.array([0.0, 0.08, 0.0]))
+    env.reset()
+    hand_id = env.model.body("hand").id
+    lf_id = env.model.body("left_finger").id
+    rf_id = env.model.body("right_finger").id
+
+    configs = [np.zeros(7), env.get_joint_positions().copy()]
+    rng = np.random.default_rng(19)
+    configs += [rng.uniform(-1.2, 1.2, size=7) for _ in range(5)]
+
+    for q in configs:
+        env.data.qpos[:7] = q
+        mujoco.mj_forward(env.model, env.data)
+        mj_rot = env.data.xmat[hand_id].reshape(3, 3).copy()
+        _, rot = panda_tcp_pose_numpy(q)
+        np.testing.assert_allclose(rot, mj_rot, atol=1e-6)
+
+        closing_dir_world = env.data.xpos[rf_id] - env.data.xpos[lf_id]
+        closing_dir_world /= np.linalg.norm(closing_dir_world)
+        local_y = rot[:, 1]
+        # Anti-parallel is fine (left/right labeling is arbitrary); only the
+        # axis, not the sign, matters for the lateral-offset cost.
+        assert abs(abs(np.dot(closing_dir_world, local_y)) - 1.0) < 1e-4

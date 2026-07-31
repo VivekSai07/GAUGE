@@ -1,5 +1,6 @@
 import mujoco
 import numpy as np
+from control.panda_kinematics import panda_tcp_pose_numpy
 from sim.conveyor_scene import ConveyorSceneEnv
 
 
@@ -121,3 +122,59 @@ def test_reset_pose_is_stable_under_zero_velocity_command():
         env.step(qdot_cmd=np.zeros(7))
     q_after = env.get_joint_positions()
     assert np.max(np.abs(q_after - q_before)) < 0.01
+
+
+def test_stop_conveyor_object_halts_its_motion():
+    """Found via a user-reported visual grasp failure: the conveyor
+    object's velocity actuators ran for the entire episode with nothing to
+    ever stop them, so even a mechanically successful grasp was fighting
+    the object's own commanded velocity forever. stop_conveyor_object()
+    should zero that out."""
+    env = ConveyorSceneEnv(conveyor_velocity=np.array([0.0, 0.1, 0.0]))
+    env.reset()
+    initial_pos = env.get_object_ground_truth().copy()
+    for _ in range(50):
+        env.step(qdot_cmd=np.zeros(7))
+    moving_pos = env.get_object_ground_truth().copy()
+
+    env.stop_conveyor_object()
+    for _ in range(50):
+        env.step(qdot_cmd=np.zeros(7))
+    stopped_pos = env.get_object_ground_truth()
+
+    # It was actually moving before (sanity check the test scenario itself).
+    assert moving_pos[1] > initial_pos[1] + 0.005
+    # Negligible residual drift after stopping (small contact/settling
+    # motion is fine; continuing at the original 0.1 m/s is not).
+    assert abs(stopped_pos[1] - moving_pos[1]) < 0.01
+
+
+def test_is_grasped_false_when_nothing_touching():
+    env = ConveyorSceneEnv(conveyor_velocity=np.array([0.0, 0.0, 0.0]))
+    env.reset()
+    assert env.is_grasped() is False
+
+
+def test_is_grasped_true_when_both_fingers_contact_the_object():
+    """Direct, deterministic construction (not a full approach trajectory):
+    close the gripper first, then place the object exactly at the
+    fingertip-pad midpoint (panda_tcp_pose_numpy) so it overlaps both
+    already-closed pads immediately -- no fall time needed before contact
+    can register, unlike placing it before closing (which lets gravity pull
+    it past the fingers first)."""
+    env = ConveyorSceneEnv(conveyor_velocity=np.array([0.0, 0.0, 0.0]))
+    env.reset()
+    obj_joint_id = env.model.body("conveyor_object").jntadr[0]
+    qpos_addr = env.model.jnt_qposadr[obj_joint_id]
+
+    env.data.qpos[7:9] = 0.0  # fingers already closed
+    env.set_gripper(closed=True)
+    mujoco.mj_forward(env.model, env.data)
+
+    tcp_pos, _ = panda_tcp_pose_numpy(env.get_joint_positions())
+    env.data.qpos[qpos_addr : qpos_addr + 3] = tcp_pos
+    env.data.qpos[qpos_addr + 3 : qpos_addr + 7] = [1, 0, 0, 0]
+    env.data.qvel[:] = 0
+    mujoco.mj_forward(env.model, env.data)
+
+    assert env.is_grasped() is True

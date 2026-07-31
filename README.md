@@ -15,16 +15,24 @@ plain Python modules wired together in `run_conveyor_demo.py`.
 
 ## Demonstrated result
 
-At `configs/conveyor.yaml`'s shipped `grasp.position_tolerance: 0.035`, the
-system grasps at a true (ground-truth) fingertip-to-object error of
-**~4.4cm**, verified deterministically by `tests/test_integration_conveyor.py`
-— close to the originally-targeted 3cm. The conveyor object is a real,
-physically-simulated body (not a scripted ghost), so the gripper can
-actually hold it. See
+The Franka genuinely picks up the cube: `run_one_episode()` returns
+`contact_verified: True` — both fingers simultaneously in physical contact
+with the object (MuJoCo's own contact array, not inferred from distance),
+sustained for a real hold, not an instant. Fingertip-to-object accuracy at
+the commit instant is **~3.9cm**, close to the originally-targeted 3cm.
+Verified deterministic and reproducible by
+`tests/test_integration_conveyor.py`.
+
+Getting here took three rounds of real fixes, not tuning: the conveyor
+object had to become a genuinely physically-simulated body (not a scripted
+ghost immune to contact forces), the MPC needed actual orientation control
+(position-only tracking left the object centered in aggregate distance but
+off the gripper's closing axis), and grip friction needed raising so the
+object didn't slip out under gravity. See
 [the design spec's Section 12](docs/superpowers/specs/2026-07-29-dynamic-object-tracking-manipulation-design.md#12-demonstrated-accuracy--known-limitation)
-for the full history, including an earlier ~7cm result and the three
-specific fixes (real object physics, a smoothed approach target, and
-fingertip-consistent targeting) that closed most of the gap.
+("Round 3" in particular) for the full root-cause story — including why an
+earlier, honestly-measured ~4.4cm accuracy number still described a system
+that had never once picked anything up.
 
 ## Running it
 

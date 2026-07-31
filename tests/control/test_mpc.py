@@ -1,5 +1,10 @@
 import numpy as np
-from control.panda_kinematics import panda_fk_symbolic, panda_fk_numpy
+from control.panda_kinematics import (
+    panda_fk_symbolic,
+    panda_fk_numpy,
+    panda_tcp_pose_symbolic,
+    panda_tcp_pose_numpy,
+)
 from control.mpc import KinematicMPC
 
 
@@ -179,3 +184,51 @@ def test_terminal_weight_reduces_terminal_step_tracking_error():
     err_with = np.linalg.norm(panda_fk_numpy(q_final_with) - target)
 
     assert err_with < err_no - 1e-4
+
+
+def test_lateral_axis_weight_reduces_offset_along_gripper_local_x():
+    """pose_fk_func/lateral_axis_weight (added after a user-reported visual
+    grasp failure) are supposed to bias the solver toward centering the
+    target along the gripper's local X axis (the axis the fingers cannot
+    correct for by closing) -- not just minimizing aggregate 3D distance.
+    Construct a target offset purely along q_current's own local-X
+    direction (a case the plain position cost has no particular reason to
+    zero out, since any point at the same 3D distance is equally good to
+    it) and verify a solve with lateral_axis_weight > 0 reduces that
+    specific local-X component more than an otherwise identical solve
+    without it.
+    """
+    fk = panda_fk_symbolic()
+    pose_fk = panda_tcp_pose_symbolic()
+    q_current = np.array([0.0, -0.3, 0.0, -1.8, 0.0, 1.5, 0.7])
+    current_pos, current_rot = panda_tcp_pose_numpy(q_current)
+    local_x = current_rot[:, 0]
+
+    # Offset the target purely along local X, plus a small Z nudge so the
+    # position cost alone has some real displacement to chase (keeping the
+    # scenario realistic rather than a pure-nullspace edge case).
+    target = current_pos + 0.05 * local_x + np.array([0.0, 0.0, 0.01])
+
+    common = dict(
+        fk_func=fk,
+        horizon=5,
+        dt=0.05,
+        q_min=np.full(7, -2.8),
+        q_max=np.full(7, 2.8),
+        qdot_max=np.full(7, 1.5),
+        pose_fk_func=pose_fk,
+    )
+    mpc_no_lateral = KinematicMPC(**common, lateral_axis_weight=0.0)
+    mpc_with_lateral = KinematicMPC(**common, lateral_axis_weight=5.0)
+
+    qdot_no = mpc_no_lateral.solve(q_current, target)
+    qdot_with = mpc_with_lateral.solve(q_current, target)
+
+    q_next_no = q_current + qdot_no * 0.05
+    q_next_with = q_current + qdot_with * 0.05
+
+    def lateral_offset(q):
+        pos, rot = panda_tcp_pose_numpy(q)
+        return abs(np.dot(rot[:, 0], pos - target))
+
+    assert lateral_offset(q_next_with) < lateral_offset(q_next_no) - 1e-3

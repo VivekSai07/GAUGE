@@ -53,6 +53,12 @@ mpc:
   qdot_max: 1.5
   posture_weight: 0.01
   terminal_weight: 5.0
+  # Found via a user-reported visual grasp failure and root-caused with
+  # systematic-debugging: the object sat ~3cm offset along the gripper's
+  # local X axis (the axis closing motion cannot correct) even when the TCP
+  # was close in aggregate 3D distance -- see control/mpc.py's docstring
+  # and design spec Section 12. This penalizes that specific offset.
+  lateral_axis_weight: 25.0
 
 # History: 0.03 (original spec) -> 0.11 (Task 14) -> 0.075 (Task 15's final
 # review) -> 0.035 (this fix, prompted by a user-reported visual grasp

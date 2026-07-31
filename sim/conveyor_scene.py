@@ -271,7 +271,15 @@ def _build_model_xml() -> str:
     geom.set("size", f"{OBJECT_HALF_HEIGHT_M} {OBJECT_HALF_HEIGHT_M} {OBJECT_HALF_HEIGHT_M}")
     geom.set("rgba", "0.8 0.1 0.1 1")
     geom.set("mass", "0.05")
-    geom.set("friction", "1.0 0.5 0.1")  # high enough for the gripper to actually hold it
+    # Tangential friction raised from an initial 1.0 to 3.0: verified via a
+    # direct, long-hold instrumented check (env.is_grasped() over 1000
+    # settle steps post-grasp) that 1.0 was insufficient -- the closed
+    # gripper registered real contact momentarily, then the object visibly
+    # slipped downward and out under gravity (μ=1.0 gives too little
+    # friction force at the actuator's actual squeeze force to support the
+    # object's own weight). At 3.0, contact holds stably for a sustained
+    # ~0.6s window post-grasp (well beyond _POST_GRASP_SETTLE_STEPS).
+    geom.set("friction", "3.0 0.5 0.1")
 
     actuator = root.find("actuator")
     obj_vel_x = ET.SubElement(actuator, "velocity")
@@ -366,6 +374,46 @@ class ConveyorSceneEnv:
         )
         self.data.ctrl[:7] = self._q_target
         mujoco.mj_step(self.model, self.data)
+
+    def stop_conveyor_object(self) -> None:
+        """Zero the conveyor object's velocity actuators.
+
+        Found via a user-reported visual grasp failure: these actuators
+        (see `reset()`) command a constant velocity for the *entire*
+        episode, with nothing to ever stop them -- so even a mechanically
+        successful grasp was fighting the object's own actuator forever
+        (confirmed by direct instrumentation: object position continuing to
+        drift under its commanded velocity, opposed by gripper contact
+        forces, well after the gripper had closed). A real conveyor would
+        exert no more belt-driven force on an object once it's lifted off
+        the belt; call this once a grasp is committed to reproduce that.
+        """
+        self.data.ctrl[self._obj_vel_x_id] = 0.0
+        self.data.ctrl[self._obj_vel_y_id] = 0.0
+
+    def is_grasped(self) -> bool:
+        """Return True if both fingers are simultaneously in physical
+        contact with the conveyor object -- a real, direct verification via
+        MuJoCo's contact array, not an inference from distance. (Same
+        approach as github.com/VivekSai07/robot-manipulation-playground's
+        `grasp_controller.py::is_grasped`.)
+        """
+        lf_id = self.model.body("left_finger").id
+        rf_id = self.model.body("right_finger").id
+        lf_contact = False
+        rf_contact = False
+        for i in range(self.data.ncon):
+            contact = self.data.contact[i]
+            bodies = {
+                self.model.geom_bodyid[contact.geom1],
+                self.model.geom_bodyid[contact.geom2],
+            }
+            if self._obj_body_id in bodies:
+                if lf_id in bodies:
+                    lf_contact = True
+                if rf_id in bodies:
+                    rf_contact = True
+        return lf_contact and rf_contact
 
     def get_rgbd(self, width: int = 128, height: int = 128, camera: str = "wrist_cam"):
         if (

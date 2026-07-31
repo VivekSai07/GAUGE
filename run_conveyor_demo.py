@@ -90,6 +90,41 @@ integration debugging (see task-12-report.md for the full narrative):
    consistently throughout targeting, gating, and reporting -- previously
    only the reported metric was flange-based while nothing was TCP-based at
    all, which Section 11 flagged as a candidate fix; this implements it.
+
+9. Round 2 (task 8, above) improved position accuracy but the user
+   reported the arm still never actually picked up the cube. Direct
+   instrumentation (not another tuning sweep) found the real mechanism:
+   the object sat well-centered in aggregate 3D distance but ~3cm offset
+   along the gripper's local X axis -- the one axis the fingers' closing
+   motion physically cannot correct for (they only move along local Y).
+   Comparing against a working reference
+   (github.com/VivekSai07/robot-manipulation-playground) confirmed the
+   missing piece: that controller does full 6D pose (position +
+   orientation) tracking; this one had only ever tracked position. Three
+   fixes, each independently verified:
+   (a) `control.panda_kinematics.panda_tcp_pose_symbolic` exposes the
+       gripper's orientation (not just position), and
+       `control.mpc.KinematicMPC`'s new `lateral_axis_weight` cost term
+       penalizes the target's offset along the gripper's local X axis
+       specifically -- this is what actually centers the object between
+       the fingers, not just gets the TCP close to it.
+   (b) The conveyor object's velocity actuators used to run for the
+       *entire* episode with nothing to ever stop them, so even a
+       mechanically successful grasp was fighting the object's own
+       commanded motion forever. `env.stop_conveyor_object()` is now
+       called the instant the gripper closes.
+   (c) Even after (a) and (b), the object was slipping out of the closed
+       gripper under gravity -- confirmed via a real contact check
+       (`env.is_grasped()`, ported from the same reference repo's
+       `grasp_controller.py::is_grasped` pattern: both fingers
+       simultaneously in contact, MuJoCo's own contact array, not
+       inferred from distance) held True only briefly before flipping to
+       False. Raising the object's friction (`sim/conveyor_scene.py`)
+       from 1.0 to 3.0 fixed this -- verified via a long-hold check
+       (1000 settle steps) that contact now stays True for a sustained
+       ~0.6s window, not just an instant. `contact_verified` in this
+       function's return value, and `tests/test_integration_conveyor.py`,
+       now check this directly instead of trusting distance alone.
 """
 import time
 
@@ -98,7 +133,7 @@ import numpy as np
 import yaml
 
 from control.mpc import KinematicMPC
-from control.panda_kinematics import panda_tcp_numpy, panda_tcp_symbolic
+from control.panda_kinematics import panda_tcp_numpy, panda_tcp_symbolic, panda_tcp_pose_symbolic
 from manipulation.grasp import GraspExecutor
 from perception.camera import CameraIntrinsics
 from perception.segment import segment_object_centroid
@@ -173,6 +208,7 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
     home_ee_xy = panda_tcp_numpy(q_home)[:2].copy()
 
     fk = panda_tcp_symbolic()
+    pose_fk = panda_tcp_pose_symbolic()
     mpc_cfg = config["mpc"]
     mpc = KinematicMPC(
         fk_func=fk,
@@ -184,6 +220,8 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
         posture_target=q_home,
         posture_weight=mpc_cfg.get("posture_weight", 0.0),
         terminal_weight=mpc_cfg.get("terminal_weight", 0.0),
+        pose_fk_func=pose_fk,
+        lateral_axis_weight=mpc_cfg.get("lateral_axis_weight", 0.0),
     )
     grasp_executor = GraspExecutor(
         position_tolerance=config["grasp"]["position_tolerance"],
@@ -310,6 +348,12 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
 
         if grasp_executor.should_close(ee_pos, target, status, covariance=track.kf.P):
             env.set_gripper(closed=True)
+            # Found via a user-reported visual grasp failure: without this,
+            # the object's conveyor velocity actuator keeps commanding
+            # motion forever, fighting the grip indefinitely (confirmed by
+            # direct instrumentation). A real conveyor exerts no more
+            # belt-driven force once an object is lifted off it.
+            env.stop_conveyor_object()
             true_obj_pos = env.get_object_ground_truth()
             grasp_error = float(np.linalg.norm(ee_pos - true_obj_pos))
             # Hold the closing command for a few more sim steps so the
@@ -325,11 +369,26 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
                     remaining = env.dt - (time.perf_counter() - settle_start)
                     if remaining > 0:
                         time.sleep(remaining)
-            result = {"grasped": True, "grasp_error_m": grasp_error, "steps": step}
+            # Real, direct verification (env.is_grasped(): both fingers
+            # simultaneously in contact with the object, MuJoCo contact
+            # array, not inferred from distance) -- see design spec Section
+            # 12 for why `grasped`/`grasp_error_m` alone were never enough
+            # to confirm an actual pick.
+            result = {
+                "grasped": True,
+                "grasp_error_m": grasp_error,
+                "steps": step,
+                "contact_verified": env.is_grasped(),
+            }
             break
 
     if result is None:
-        result = {"grasped": False, "grasp_error_m": None, "steps": config["max_steps"]}
+        result = {
+            "grasped": False,
+            "grasp_error_m": None,
+            "steps": config["max_steps"],
+            "contact_verified": False,
+        }
 
     if viewer is not None:
         # Hold the window open with the final state visible until the user
