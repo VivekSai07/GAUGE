@@ -10,6 +10,7 @@ dependencies = [
     "numpy>=1.26",
     "pyyaml>=6.0",
     "defusedxml>=0.7.1",
+    "opencv-python>=5.0.0.93",
 ]
 
 [dependency-groups]
