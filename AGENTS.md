@@ -23,10 +23,14 @@ uv sync                              # install deps (uv-managed venv already pre
 uv run pytest -v                     # full test suite
 uv run python run_conveyor_demo.py   # one closed-loop episode
 uv run python run_conveyor_demo.py --render  # same, with MuJoCo viewer window
+uv run ruff check .                  # lint
+uv run ruff format .                 # format
 ```
 
-No linter/formatter is configured (no ruff/black/mypy) — match the
-surrounding file's style exactly rather than reformatting.
+`ruff` lint/format is enforced in CI (`extend-exclude`s the vendored
+menagerie submodule and `docs/`, which has historical planning/spec docs
+with embedded code snippets that aren't live code). Run both before
+committing.
 
 ## Code conventions
 
