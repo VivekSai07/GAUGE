@@ -687,3 +687,111 @@ that actually mattered (physical contact, sustained). The fix was not "sweep
 harder" a third time; it was watching the system run, and — critically —
 consulting a second, independent, *working* implementation of the same
 problem class rather than re-deriving a fix from first principles alone.
+
+## Round 4: `contact_verified` itself was checked at the wrong moment — and finding that revealed a real, still-open sensing-precision limit
+
+Round 3's `contact_verified` check ran immediately after the gripper closed
+and a short settle, while the object was still sitting essentially where it
+was grasped. That proves momentary contact, not a real hold — a gripper
+closed around an object resting on the platform, without enough grip to
+support it once airborne, would pass that check too. Informed by the same
+reference repo's `pick_and_place_m13_reactive.py`, which has an explicit
+"Verify Lift" state (close → lift ~15cm → only then check `is_grasped`,
+resetting on failure), `run_conveyor_demo.py::run_one_episode` gained a real
+~10cm lift phase (ramped over 40 MPC control ticks, not a step input) after
+grasp-commit, and `contact_verified` now means "held through that lift," not
+"touching at the instant of closing." `object_height_gain_m`/
+`object_peak_height_gain_m` give direct, checkable proof of whether the
+object was actually carried upward. Built via TDD + subagent-driven-development
+(`docs/superpowers/plans/2026-08-01-lift-verified-grasp.md`); a final
+whole-branch review found and fixed three real issues in the first pass
+(the height-gain baseline was sampled after the settle loop instead of at
+the grasp-commit instant, contaminating the metric; the lift target jumped
+to its full offset on tick 1 instead of ramping; `stop_conveyor_object()`
+zeroed `ctrl` but left the velocity actuators enabled as active brakes
+rather than a real detach) — merged as
+[PR #20](https://github.com/VivekSai07/GAUGE/pull/20).
+
+**The mechanism is correct. It immediately proved Round 3's number wrong.**
+Running the real episode with the lift check in place: `contact_verified:
+False`, `object_peak_height_gain_m: ~0.03` against the new test's 0.05
+threshold. The object that Round 3 reported as grasped does not survive
+being lifted. This is the check doing its job, not a regression.
+
+**Root-causing this (not just re-tuning) went through `systematic-debugging`,
+eight-plus hypotheses deep, each tested against a real run rather than
+argued from theory:**
+
+1. Enabling the already-built but previously-unused `grasp.cov_threshold`
+   (covariance-gated commit) — never fires within `max_steps`; the KF's
+   position covariance plateaus at its steady-state floor (~3.7e-4 trace)
+   and does not shrink further no matter how long the episode waits.
+2. Tightening `position_tolerance` from 0.035 down to 0.01 — `grasp_error_m`
+   nearly halves (0.039 → 0.021), but `object_peak_height_gain_m` does not
+   improve (stays ~0.024–0.030). Aggregate distance accuracy is not the
+   controlling variable.
+3. Sweeping `kf.meas_var` over 20× — no measurable effect on anything. The
+   sim is fully deterministic (no randomness for the filter to average
+   out), so re-weighting measurement trust doesn't change a fixed,
+   geometry-driven residual.
+4. Raising object friction past 5.0 — the episode stops committing to a
+   grasp at all. This reproduces the exact platform-tilt instability
+   already root-caused and fixed in `experiments/watch_conveyor_tracking.py`
+   earlier this project (high friction + a directly-actuated free body
+   against a static surface). Not a free knob.
+5. Commanding a partial gripper closure sized to the object's known 4cm
+   width instead of full closure (`ctrl=0`) — alone, makes it worse (the
+   fingers stop before reaching a mis-centered object at all rather than
+   dragging into contact).
+6. An explicit MPC-target-relative closing-axis gate — drives `ee_pos` to
+   within 1.7cm of *`target`*, but `target` itself carries the error, so
+   this doesn't touch the real problem.
+7. Waiting extra ticks after the hold→move transition before allowing
+   commit (a debounce) — genuinely helps (`grasp_error_m` down to ~0.018 at
+   30 ticks) but still never survives the lift.
+8. **The isolating experiment that found the real, quantified root cause:**
+   teleporting the object to the arm's exact TCP position at the real
+   commit instant (bypassing perception/tracking entirely) shows the grip
+   mechanism itself is flawless at zero error — symmetric closure, holds
+   through the full lift, every time. A controlled sweep of offsets along
+   each gripper-local axis from that same isolated instant found a sharp,
+   reproducible cliff: **closing-axis (local Y) misalignment is tolerated
+   up to ~3.0cm and fails completely at 3.67cm** — almost exactly where the
+   real closed-loop system lands (measured Y-offset at commit: 3.67cm). X
+   and Z offsets up to 2cm barely matter. This is not a vague accuracy
+   problem; it is one specific, mechanically-grounded number (close to the
+   Panda finger's own ~4cm travel limit) to beat.
+9. A second, independently confirmed effect on top of (8): even after the
+   gripper closes, the object drifts a further ~1.2cm along the closing
+   axis *while the fingers are still closing* (~0.4s) — residual conveyor
+   velocity plus the closing finger dragging a not-quite-centered object,
+   not free sliding (confirmed by logging the object's world position
+   throughout the settle window).
+10. A redesigned commit sequence addressing both (8) and (9) directly — a
+    final re-measurement phase right before closing (tracking the fresh
+    raw segmentation centroid instead of the possibly lagging KF/blend
+    target) plus a brief hard velocity-zero on the conveyor actuators to
+    kill residual momentum fast, before switching to the full detach used
+    for the lift — measurably improved accuracy (0.039 → 0.027) but did
+    not clear the bar either. Pushing the re-measurement window longer
+    (40–60 ticks) made it *worse* (error up to 0.13): tracking a raw,
+    unfiltered single-frame measurement for many ticks without the KF's
+    smoothing diverges rather than converges.
+
+**Conclusion, not yet fixed:** every lever available at the control/timing
+layer tops out right around the 2–3cm cliff found in (8), inconsistently on
+either side of it. The evidence points to a sensing-resolution limit, not a
+control-logic bug: 64×64 RGB-D color-threshold segmentation of a 4cm object
+may not support the sub-2cm precision this gripper geometry needs,
+independent of how the commit timing is arranged around it. The two most
+likely real fixes, neither attempted yet: (a) improve segmentation accuracy
+itself (HSV thresholding — already flagged as a fragility in
+`experiments/watch_conveyor_tracking.py`'s docstring — sub-pixel centroid
+refinement, or averaging multiple frames in a genuinely-stationary final
+approach rather than one that keeps chasing a moving estimate), or (b) widen
+the physical margin (a larger object, or a wider effective gripper reach)
+so the existing ~2–3cm accuracy has room to work with. This is left as a
+documented, evidenced, open limitation rather than a silently-abandoned
+thread — `contact_verified`/`object_peak_height_gain_m` will continue to
+report it honestly as `False` until one of these is actually done, exactly
+as Round 3 established this project should behave.
