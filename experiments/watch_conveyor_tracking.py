@@ -15,7 +15,7 @@ import cv2
 import mujoco
 import numpy as np
 
-_BELT_Y_HALF = 0.5  # cube wraps around when it travels this far past start
+_BELT_Y_HALF = 0.45  # cube wraps before reaching the camera's FOV edge (~0.577 at this height/fovy)
 
 _MODEL_XML = """
 <mujoco>
@@ -49,11 +49,7 @@ _MODEL_XML = """
       <geom type="box" size="0.02 0.02 0.02" rgba="0.8 0.1 0.1 1" mass="0.05" friction="0.05 0.005 0.0001"/>
     </body>
   </worldbody>
-  <equality>
-    <joint joint1="roller1_joint" joint2="roller2_joint"/>
-  </equality>
   <actuator>
-    <velocity name="roller_vel" joint="roller1_joint" kv="5" ctrlrange="-20 20"/>
     <velocity name="cube_vel" joint="cube_joint" gear="0 1 0 0 0 0" kv="50" ctrlrange="-1 1"/>
   </actuator>
 </mujoco>
@@ -82,12 +78,28 @@ def main() -> None:
     cube_qpos_addr = model.jnt_qposadr[cube_joint_id]
     cube_start = data.qpos[cube_qpos_addr : cube_qpos_addr + 3].copy()
 
+    # Rollers used to be driven by their own velocity actuator + an
+    # equality constraint syncing them. Confirmed by direct isolation test
+    # (set roller ctrl to 0, cube moved fine; left at its previous value,
+    # cube froze): the thin cylinder's tiny rotational inertia meant the
+    # actuator's kv gain demanded an acceleration the solver couldn't
+    # resolve in one step (the "Nan/Inf in QACC at DOF 0" warning), and
+    # that divergence poisoned the whole timestep's solve -- not just the
+    # roller, the cube too. Rollers are purely decorative (the cube's
+    # actual motion comes from cube_vel below), so they're now spun
+    # kinematically -- direct qpos increment, no actuator, no dynamics,
+    # no way to destabilize anything else.
+    roller1_qpos_addr = model.jnt_qposadr[model.body("roller1").jntadr[0]]
+    roller2_qpos_addr = model.jnt_qposadr[model.body("roller2").jntadr[0]]
+    roller_spin_rate = 4.0  # rad/s, visual only
+
     data.ctrl[model.actuator("cube_vel").id] = 0.08
-    data.ctrl[model.actuator("roller_vel").id] = 4.0  # visual only
 
     renderer = mujoco.Renderer(model, height=240, width=240)
 
     while True:
+        data.qpos[roller1_qpos_addr] += roller_spin_rate * model.opt.timestep
+        data.qpos[roller2_qpos_addr] += roller_spin_rate * model.opt.timestep
         mujoco.mj_step(model, data)
 
         # Wrap the cube back to the start once it clears the belt, so this
