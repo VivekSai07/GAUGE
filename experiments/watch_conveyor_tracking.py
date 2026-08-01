@@ -25,20 +25,28 @@ _MODEL_XML = """
   <worldbody>
     <geom name="floor" type="plane" size="2 2 0.01" rgba="0.5 0.5 0.5 1"/>
     <camera name="topdown" pos="0.5 0 1.1" euler="0 0 0" fovy="60"/>
+    <!-- contype/conaffinity=0: rollers are visual only (spin for a "real
+         conveyor" look). Their cylinders geometrically overlap the belt
+         surface at each end (radius/length were sized for looks, not
+         clearance) -- with collision left on, the cube runs into a roller
+         near the far end and catastrophically tips (~46 deg, confirmed by
+         direct instrumentation). The cube's actual motion is driven by its
+         own velocity actuator below, not by belt/roller friction, so the
+         rollers don't need to physically interact with anything. -->
     <body name="roller1" pos="0.5 0.52 0.03" euler="1.5708 0 0">
       <joint name="roller1_joint" type="hinge" damping="0.01"/>
-      <geom type="cylinder" size="0.02 0.16" rgba="0.2 0.2 0.2 1"/>
+      <geom type="cylinder" size="0.02 0.16" rgba="0.2 0.2 0.2 1" contype="0" conaffinity="0"/>
     </body>
     <body name="roller2" pos="0.5 -0.52 0.03" euler="1.5708 0 0">
       <joint name="roller2_joint" type="hinge" damping="0.01"/>
-      <geom type="cylinder" size="0.02 0.16" rgba="0.2 0.2 0.2 1"/>
+      <geom type="cylinder" size="0.02 0.16" rgba="0.2 0.2 0.2 1" contype="0" conaffinity="0"/>
     </body>
     <body name="belt" pos="0.5 0 0.03">
       <geom type="box" size="0.15 0.55 0.01" rgba="0.15 0.15 0.15 1" friction="0.001 0.005 0.001"/>
     </body>
-    <body name="cube" pos="0.5 -0.4 0.05">
+    <body name="cube" pos="0.5 -0.4 0.06">
       <joint name="cube_joint" type="free" damping="0.1"/>
-      <geom type="box" size="0.02 0.02 0.02" rgba="0.8 0.1 0.1 1" mass="0.05" friction="1.0 0.5 0.1"/>
+      <geom type="box" size="0.02 0.02 0.02" rgba="0.8 0.1 0.1 1" mass="0.05" friction="0.05 0.005 0.0001"/>
     </body>
   </worldbody>
   <equality>
@@ -51,8 +59,19 @@ _MODEL_XML = """
 </mujoco>
 """
 
+# Widened from an initial [255,80,80] upper bound: directly under a
+# top-down camera, the headlight hits the cube's flat top face at near-
+# normal incidence, washing the rendered color toward [227,84,84] --
+# desaturated just past the original G/B cutoff, causing real, confirmed
+# detection dropouts at the exact center of the belt (directly below the
+# camera). Pure RGB thresholding is inherently fragile to this kind of
+# lighting-angle effect; the same fragility likely exists in the main
+# project's perception/segment.py, whose wrist camera sees the same
+# near-normal-incidence geometry during final approach. HSV-based
+# thresholding (hue is largely lighting-invariant) would be the more
+# robust long-term fix there; widening the window is the quick fix here.
 _COLOR_LOWER = np.array([150, 0, 0])
-_COLOR_UPPER = np.array([255, 80, 80])
+_COLOR_UPPER = np.array([255, 110, 110])
 
 
 def main() -> None:
