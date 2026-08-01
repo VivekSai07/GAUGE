@@ -9,10 +9,16 @@ project's existing conventions (OBJECT_HALF_HEIGHT_M=0.02, belt height
 matching sim/conveyor_scene.py's platform).
 
 Run: uv run python experiments/watch_conveyor_tracking.py
-Press 'q' in the window to quit.
+Opens two windows: the interactive MuJoCo 3D viewer (free-look, scroll to
+zoom, drag to orbit -- inspect the cube/belt from any angle) and the
+top-down tracking overlay. Press 'q' in the tracking window, or close the
+3D viewer window, to quit.
 """
+import time
+
 import cv2
 import mujoco
+import mujoco.viewer
 import numpy as np
 
 _BELT_Y_HALF = 0.45  # cube wraps before reaching the camera's FOV edge (~0.577 at this height/fovy)
@@ -96,11 +102,15 @@ def main() -> None:
     data.ctrl[model.actuator("cube_vel").id] = 0.08
 
     renderer = mujoco.Renderer(model, height=240, width=240)
+    viewer = mujoco.viewer.launch_passive(model, data)
 
-    while True:
+    while viewer.is_running():
+        step_start = time.perf_counter()
+
         data.qpos[roller1_qpos_addr] += roller_spin_rate * model.opt.timestep
         data.qpos[roller2_qpos_addr] += roller_spin_rate * model.opt.timestep
         mujoco.mj_step(model, data)
+        viewer.sync()
 
         # Wrap the cube back to the start once it clears the belt, so this
         # runs as a continuous loop instead of needing manual restarts.
@@ -134,7 +144,12 @@ def main() -> None:
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
+        remaining = model.opt.timestep - (time.perf_counter() - step_start)
+        if remaining > 0:
+            time.sleep(remaining)
+
     cv2.destroyAllWindows()
+    viewer.close()
 
 
 if __name__ == "__main__":
