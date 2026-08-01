@@ -125,6 +125,27 @@ integration debugging (see task-12-report.md for the full narrative):
        ~0.6s window, not just an instant. `contact_verified` in this
        function's return value, and `tests/test_integration_conveyor.py`,
        now check this directly instead of trusting distance alone.
+
+10. `contact_verified` (point 9c) was still checked immediately after the
+    gripper closed, while the object was still sitting exactly where it
+    was grasped -- a closed gripper merely resting on an ungripped object
+    (friction and geometry alone holding it in the fingers' footprint,
+    no real grip force) could pass that check without ever being able to
+    support the object's weight once airborne. The reference repo
+    (github.com/VivekSai07/robot-manipulation-playground)'s state machine
+    has a distinct "Verify Lift" state after its grasp state for exactly
+    this reason -- contact at rest is not proof of a hold. `run_one_episode`
+    now commands a real ~10cm TCP lift (`_LIFT_HEIGHT_M`, straight up from
+    the grasp-commit TCP position, held for `_LIFT_CONTROL_TICKS` control
+    ticks via the same `mpc.solve` used for tracking) and a post-lift
+    settle (`_POST_LIFT_SETTLE_STEPS`, gripper still closed) before the
+    single `env.is_grasped()` call that now determines `contact_verified`.
+    `object_height_gain_m` -- the object's world-frame Z position after
+    the lift+settle minus its Z position at the grasp-commit instant -- is
+    added to the return value as direct, human-checkable proof that the
+    object was actually carried upward with the gripper, not left behind
+    on the platform while the gripper merely closed around empty space
+    above it.
 """
 import time
 
@@ -162,6 +183,13 @@ _CLOSE_RANGE_M = 0.15
 # anywhere in this pipeline; see Section 12 for why the reported accuracy is
 # a commit-instant distance, not a verified successful grasp.
 _POST_GRASP_SETTLE_STEPS = 200
+# Lift phase constants (see module docstring, point 10). The lift target is
+# straight up (+Z) from the TCP's grasp-commit position; ticks/settle are
+# sized generously against mpc_cfg["qdot_max"] and _POST_GRASP_SETTLE_STEPS
+# respectively -- see task-1-brief.md for the sizing rationale.
+_LIFT_HEIGHT_M = 0.10
+_LIFT_CONTROL_TICKS = 40
+_POST_LIFT_SETTLE_STEPS = 200
 
 
 def _camera_point_to_world(
@@ -369,16 +397,54 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
                     remaining = env.dt - (time.perf_counter() - settle_start)
                     if remaining > 0:
                         time.sleep(remaining)
+
+            # Lift phase (see module docstring, point 10): a closed gripper
+            # merely resting on an unlifted object can pass a contact check
+            # at the commit instant even though it has no real hold. Actually
+            # commanding the TCP _LIFT_HEIGHT_M upward and re-checking contact
+            # afterward -- mirroring the reference repo's "Verify Lift" state
+            # -- is the only way to distinguish a genuine grip from one that
+            # merely happened to be touching.
+            object_pos_before_lift = env.get_object_ground_truth()
+            lift_target = ee_pos + np.array([0.0, 0.0, _LIFT_HEIGHT_M])
+            for _ in range(_LIFT_CONTROL_TICKS):
+                q_current = env.get_joint_positions()
+                qdot_cmd = mpc.solve(q_current, lift_target)
+                for _ in range(sim_steps_per_control):
+                    lift_start = time.perf_counter()
+                    env.step(qdot_cmd)
+                    if viewer is not None:
+                        viewer.sync()
+                        remaining = env.dt - (time.perf_counter() - lift_start)
+                        if remaining > 0:
+                            time.sleep(remaining)
+            qdot_cmd = np.zeros(7)
+            for _ in range(_POST_LIFT_SETTLE_STEPS):
+                lift_settle_start = time.perf_counter()
+                env.step(qdot_cmd)
+                if viewer is not None:
+                    viewer.sync()
+                    remaining = env.dt - (time.perf_counter() - lift_settle_start)
+                    if remaining > 0:
+                        time.sleep(remaining)
+
             # Real, direct verification (env.is_grasped(): both fingers
             # simultaneously in contact with the object, MuJoCo contact
             # array, not inferred from distance) -- see design spec Section
             # 12 for why `grasped`/`grasp_error_m` alone were never enough
-            # to confirm an actual pick.
+            # to confirm an actual pick. Now evaluated after the lift +
+            # settle above (module docstring, point 10), not immediately
+            # after the gripper closes.
+            contact_verified = env.is_grasped()
+            object_height_gain_m = float(
+                env.get_object_ground_truth()[2] - object_pos_before_lift[2]
+            )
             result = {
                 "grasped": True,
                 "grasp_error_m": grasp_error,
                 "steps": step,
-                "contact_verified": env.is_grasped(),
+                "contact_verified": contact_verified,
+                "object_height_gain_m": object_height_gain_m,
             }
             break
 
@@ -388,6 +454,7 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
             "grasp_error_m": None,
             "steps": config["max_steps"],
             "contact_verified": False,
+            "object_height_gain_m": None,
         }
 
     if viewer is not None:

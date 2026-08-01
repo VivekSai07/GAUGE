@@ -23,3 +23,12 @@ def test_conveyor_episode_grasps_within_tolerance():
     # array) -- see design spec Section 12 and sim/conveyor_scene.py's
     # `is_grasped()`.
     assert result["contact_verified"] is True
+    # Added to close a real gap: the old contact_verified check ran
+    # immediately after the gripper closed, while the object was still
+    # sitting where it was grasped -- that proves contact, not a hold. A
+    # gripper closed around an object resting on the platform, without
+    # enough grip to support it once airborne, would have passed the old
+    # check. contact_verified is now checked after a real ~10cm lift (see
+    # run_conveyor_demo.py); object_height_gain_m is direct proof the
+    # object was actually carried upward with the gripper, not left behind.
+    assert result["object_height_gain_m"] > 0.05
