@@ -7,6 +7,7 @@ shrunk below a threshold. This is OFF by default (`cov_threshold=None`) so
 every existing caller/test/config is completely unaffected unless a
 threshold is explicitly supplied.
 """
+
 import numpy as np
 
 from tracking.track import TrackStatus

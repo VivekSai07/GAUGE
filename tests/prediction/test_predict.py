@@ -1,4 +1,7 @@
+from itertools import pairwise
+
 import numpy as np
+
 from prediction.predict import propagate
 
 
@@ -36,4 +39,4 @@ def test_covariance_grows_monotonically():
 
     result = propagate(x0, P0, F, Q, steps=5)
     traces = [np.trace(P_k) for _, P_k in result]
-    assert all(t2 > t1 for t1, t2 in zip(traces, traces[1:]))
+    assert all(t2 > t1 for t1, t2 in pairwise(traces))

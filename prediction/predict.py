@@ -1,4 +1,5 @@
 """Forward propagation of a linear-Gaussian state estimate."""
+
 import numpy as np
 
 

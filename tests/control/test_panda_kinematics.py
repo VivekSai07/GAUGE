@@ -1,12 +1,13 @@
 import mujoco
 import numpy as np
+
 from control.panda_kinematics import (
-    panda_fk_symbolic,
     panda_fk_numpy,
-    panda_tcp_symbolic,
+    panda_fk_symbolic,
     panda_tcp_numpy,
-    panda_tcp_pose_symbolic,
     panda_tcp_pose_numpy,
+    panda_tcp_pose_symbolic,
+    panda_tcp_symbolic,
 )
 from sim.conveyor_scene import ConveyorSceneEnv
 
@@ -98,8 +99,12 @@ def test_tcp_numpy_matches_mujoco_fingertip_pad_midpoint():
     # these indices refer to.
     assert env.model.geom_bodyid[lf_pad_geom_id] == env.model.body("left_finger").id
     assert env.model.geom_bodyid[rf_pad_geom_id] == env.model.body("right_finger").id
-    assert np.allclose(env.model.geom_pos[lf_pad_geom_id], [0.0, 0.0055, 0.0445], atol=1e-4)
-    assert np.allclose(env.model.geom_pos[rf_pad_geom_id], [0.0, 0.0055, 0.0445], atol=1e-4)
+    assert np.allclose(
+        env.model.geom_pos[lf_pad_geom_id], [0.0, 0.0055, 0.0445], atol=1e-4
+    )
+    assert np.allclose(
+        env.model.geom_pos[rf_pad_geom_id], [0.0, 0.0055, 0.0445], atol=1e-4
+    )
 
     configs = [np.zeros(7), env.get_joint_positions().copy()]
     rng = np.random.default_rng(13)
@@ -108,7 +113,9 @@ def test_tcp_numpy_matches_mujoco_fingertip_pad_midpoint():
     for q in configs:
         env.data.qpos[:7] = q
         mujoco.mj_forward(env.model, env.data)
-        mj_tcp = (env.data.geom_xpos[lf_pad_geom_id] + env.data.geom_xpos[rf_pad_geom_id]) / 2.0
+        mj_tcp = (
+            env.data.geom_xpos[lf_pad_geom_id] + env.data.geom_xpos[rf_pad_geom_id]
+        ) / 2.0
         tcp_pos = panda_tcp_numpy(q)
         np.testing.assert_allclose(tcp_pos, mj_tcp, atol=1e-6)
 

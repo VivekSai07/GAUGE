@@ -1,4 +1,5 @@
 import numpy as np
+
 from perception.camera import CameraIntrinsics
 from perception.segment import segment_object_centroid
 

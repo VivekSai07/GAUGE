@@ -14,6 +14,7 @@ zoom, drag to orbit -- inspect the cube/belt from any angle) and the
 top-down tracking overlay. Press 'q' in the tracking window, or close the
 3D viewer window, to quit.
 """
+
 import time
 
 import cv2
@@ -140,16 +141,26 @@ def main() -> None:
 
         frame = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         if len(xs) > 0:
-            u, v = int(round(xs.mean())), int(round(ys.mean()))
+            u, v = round(xs.mean()), round(ys.mean())
             cv2.drawMarker(frame, (u, v), (0, 255, 0), cv2.MARKER_CROSS, 12, 2)
             cv2.putText(
-                frame, f"centroid=({u},{v})  n_px={len(xs)}", (5, 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1,
+                frame,
+                f"centroid=({u},{v})  n_px={len(xs)}",
+                (5, 15),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                (0, 255, 0),
+                1,
             )
         else:
             cv2.putText(
-                frame, "no cube detected", (5, 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1,
+                frame,
+                "no cube detected",
+                (5, 15),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                (0, 0, 255),
+                1,
             )
 
         frame = cv2.resize(frame, (480, 480), interpolation=cv2.INTER_NEAREST)

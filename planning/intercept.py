@@ -1,4 +1,5 @@
 """Closed-form time-to-intercept for a constant-velocity target."""
+
 import numpy as np
 
 

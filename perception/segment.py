@@ -1,4 +1,5 @@
 """Classical color+depth segmentation to a 3D centroid."""
+
 import numpy as np
 
 from perception.camera import CameraIntrinsics

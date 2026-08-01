@@ -139,13 +139,14 @@ Task 13 (shrink the arm's required excursion, see task-13-report.md):
    drift ~0.0075 rad, vs. this test's 0.01 rad bound at the 20-step
    checkpoint it actually asserts).
 """
+
 import math
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import defusedxml.ElementTree as DefusedET
 import mujoco
 import numpy as np
-import xml.etree.ElementTree as ET
 
 _MENAGERIE_DIR = Path(__file__).parent / "assets/menagerie/franka_emika_panda"
 _PANDA_XML = _MENAGERIE_DIR / "panda.xml"
@@ -268,7 +269,9 @@ def _build_model_xml() -> str:
     geom = ET.SubElement(obj_body, "geom")
     geom.set("name", "conveyor_object_geom")
     geom.set("type", "box")
-    geom.set("size", f"{OBJECT_HALF_HEIGHT_M} {OBJECT_HALF_HEIGHT_M} {OBJECT_HALF_HEIGHT_M}")
+    geom.set(
+        "size", f"{OBJECT_HALF_HEIGHT_M} {OBJECT_HALF_HEIGHT_M} {OBJECT_HALF_HEIGHT_M}"
+    )
     geom.set("rgba", "0.8 0.1 0.1 1")
     geom.set("mass", "0.05")
     # Tangential friction raised from an initial 1.0 to 3.0: verified via a
@@ -445,7 +448,9 @@ class ConveyorSceneEnv:
         # point 6.
         self.data.ctrl[7] = 0.0 if closed else 255.0
 
-    def camera_intrinsics(self, width: int = 128, height: int = 128, camera: str = "wrist_cam"):
+    def camera_intrinsics(
+        self, width: int = 128, height: int = 128, camera: str = "wrist_cam"
+    ):
         cam_id = self.model.camera(camera).id
         fovy_deg = self.model.cam_fovy[cam_id]
         fovy = np.deg2rad(fovy_deg)

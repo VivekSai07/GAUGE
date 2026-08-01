@@ -1,4 +1,5 @@
 import numpy as np
+
 from tracking.kf import ConstantVelocityKF
 from tracking.track import Track, TrackStatus
 
@@ -11,7 +12,7 @@ def make_track(**overrides):
         init_state=np.zeros(6),
         init_cov=np.eye(6) * 0.01,
     )
-    defaults = dict(gate_threshold=9.0, m=3, n=5, max_consecutive_misses=3)
+    defaults = {"gate_threshold": 9.0, "m": 3, "n": 5, "max_consecutive_misses": 3}
     defaults.update(overrides)
     return Track(kf=kf, **defaults)
 

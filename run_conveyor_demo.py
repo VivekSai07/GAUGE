@@ -147,6 +147,7 @@ integration debugging (see task-12-report.md for the full narrative):
     on the platform while the gripper merely closed around empty space
     above it.
 """
+
 import time
 
 import mujoco.viewer
@@ -154,7 +155,11 @@ import numpy as np
 import yaml
 
 from control.mpc import KinematicMPC
-from control.panda_kinematics import panda_tcp_numpy, panda_tcp_symbolic, panda_tcp_pose_symbolic
+from control.panda_kinematics import (
+    panda_tcp_numpy,
+    panda_tcp_pose_symbolic,
+    panda_tcp_symbolic,
+)
 from manipulation.grasp import GraspExecutor
 from perception.camera import CameraIntrinsics
 from perception.segment import segment_object_centroid

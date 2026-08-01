@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
-from tracking.track import TrackStatus
+
 from manipulation.grasp import GraspExecutor
+from tracking.track import TrackStatus
 
 
 def test_closes_when_within_tolerance_and_confirmed():
@@ -39,7 +40,10 @@ def test_cov_gate_disabled_by_default_ignores_covariance():
     ee_pos = np.array([0.5, 0.0, 0.1])
     target = np.array([0.51, 0.0, 0.1])
     huge_cov = np.eye(6) * 1000.0
-    assert grasp.should_close(ee_pos, target, TrackStatus.CONFIRMED, covariance=huge_cov) is True
+    assert (
+        grasp.should_close(ee_pos, target, TrackStatus.CONFIRMED, covariance=huge_cov)
+        is True
+    )
 
 
 def test_cov_gate_blocks_when_covariance_too_high():
@@ -48,7 +52,10 @@ def test_cov_gate_blocks_when_covariance_too_high():
     target = np.array([0.51, 0.0, 0.1])
     # trace(P[:3,:3]) = 3.0, well above the 0.01 threshold.
     high_cov = np.eye(6) * 1.0
-    assert grasp.should_close(ee_pos, target, TrackStatus.CONFIRMED, covariance=high_cov) is False
+    assert (
+        grasp.should_close(ee_pos, target, TrackStatus.CONFIRMED, covariance=high_cov)
+        is False
+    )
 
 
 def test_cov_gate_passes_when_covariance_low_enough():
@@ -57,7 +64,10 @@ def test_cov_gate_passes_when_covariance_low_enough():
     target = np.array([0.51, 0.0, 0.1])
     # trace(P[:3,:3]) = 0.003, below the 0.01 threshold.
     low_cov = np.eye(6) * 0.001
-    assert grasp.should_close(ee_pos, target, TrackStatus.CONFIRMED, covariance=low_cov) is True
+    assert (
+        grasp.should_close(ee_pos, target, TrackStatus.CONFIRMED, covariance=low_cov)
+        is True
+    )
 
 
 def test_cov_gate_requires_covariance_argument_when_enabled():

@@ -1,11 +1,12 @@
 import numpy as np
-from control.panda_kinematics import (
-    panda_fk_symbolic,
-    panda_fk_numpy,
-    panda_tcp_pose_symbolic,
-    panda_tcp_pose_numpy,
-)
+
 from control.mpc import KinematicMPC
+from control.panda_kinematics import (
+    panda_fk_numpy,
+    panda_fk_symbolic,
+    panda_tcp_pose_numpy,
+    panda_tcp_pose_symbolic,
+)
 
 
 def test_mpc_step_reduces_distance_to_reachable_target():
@@ -126,15 +127,15 @@ def test_posture_weight_biases_solution_toward_posture_target():
     # Panda's own "home" configuration -- far from q_current in joint space.
     posture_target = np.array([0.0, 0.0, 0.0, -1.57079, 0.0, 1.57079, -0.7853])
 
-    common = dict(
-        fk_func=fk,
-        horizon=5,
-        dt=0.05,
-        q_min=np.full(7, -2.8),
-        q_max=np.full(7, 2.8),
-        qdot_max=np.full(7, 1.5),
-        posture_target=posture_target,
-    )
+    common = {
+        "fk_func": fk,
+        "horizon": 5,
+        "dt": 0.05,
+        "q_min": np.full(7, -2.8),
+        "q_max": np.full(7, 2.8),
+        "qdot_max": np.full(7, 1.5),
+        "posture_target": posture_target,
+    }
     mpc_no_posture = KinematicMPC(**common, posture_weight=0.0)
     mpc_with_posture = KinematicMPC(**common, posture_weight=0.5)
 
@@ -162,15 +163,15 @@ def test_terminal_weight_reduces_terminal_step_tracking_error():
     current_pos = panda_fk_numpy(q_current)
     target = current_pos + np.array([0.15, 0.1, -0.1])
 
-    common = dict(
-        fk_func=fk,
-        horizon=5,
-        dt=0.05,
-        q_min=np.full(7, -2.8),
-        q_max=np.full(7, 2.8),
-        qdot_max=np.full(7, 1.0),
-        effort_weight=1.0,  # heavy, so running cost alone trades off speed
-    )
+    common = {
+        "fk_func": fk,
+        "horizon": 5,
+        "dt": 0.05,
+        "q_min": np.full(7, -2.8),
+        "q_max": np.full(7, 2.8),
+        "qdot_max": np.full(7, 1.0),
+        "effort_weight": 1.0,  # heavy, so running cost alone trades off speed
+    }
     mpc_no_terminal = KinematicMPC(**common, terminal_weight=0.0)
     mpc_with_terminal = KinematicMPC(**common, terminal_weight=50.0)
 
@@ -209,15 +210,15 @@ def test_lateral_axis_weight_reduces_offset_along_gripper_local_x():
     # scenario realistic rather than a pure-nullspace edge case).
     target = current_pos + 0.05 * local_x + np.array([0.0, 0.0, 0.01])
 
-    common = dict(
-        fk_func=fk,
-        horizon=5,
-        dt=0.05,
-        q_min=np.full(7, -2.8),
-        q_max=np.full(7, 2.8),
-        qdot_max=np.full(7, 1.5),
-        pose_fk_func=pose_fk,
-    )
+    common = {
+        "fk_func": fk,
+        "horizon": 5,
+        "dt": 0.05,
+        "q_min": np.full(7, -2.8),
+        "q_max": np.full(7, 2.8),
+        "qdot_max": np.full(7, 1.5),
+        "pose_fk_func": pose_fk,
+    }
     mpc_no_lateral = KinematicMPC(**common, lateral_axis_weight=0.0)
     mpc_with_lateral = KinematicMPC(**common, lateral_axis_weight=5.0)
 

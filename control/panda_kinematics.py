@@ -22,6 +22,7 @@ cross-check against ground truth is
 which compares `panda_fk_numpy` against the real, independently-authored
 MuJoCo model's compiled body position.
 """
+
 import casadi as ca
 import numpy as np
 
@@ -47,7 +48,7 @@ _D = [0.333, 0.0, 0.316, 0.0, 0.384, 0.0, 0.0]
 _FLANGE_A, _FLANGE_ALPHA, _FLANGE_D = 0.0, 0.0, 0.107
 # Fixed offset from the flange ("hand" body) origin to the midpoint between
 # the two fingertip pads, along the flange's local Z axis. Both fingers open
-#/close symmetrically about this axis, so the midpoint is invariant to the
+# /close symmetrically about this axis, so the midpoint is invariant to the
 # gripper's opening width -- this offset does not depend on finger joint
 # state, only on the flange's pose. Measured directly against the compiled
 # MuJoCo model (average of both fingertip pad geoms' world positions,

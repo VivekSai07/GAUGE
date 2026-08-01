@@ -17,6 +17,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-cov>=7.1.0",
+    "ruff>=0.16.1",
 ]
 
 [tool.pytest.ini_options]
@@ -27,3 +28,9 @@ testpaths = ["tests"]
 # Only our own pipeline code, not the vendored mujoco_menagerie submodule.
 source = ["perception", "tracking", "prediction", "planning", "control", "manipulation", "sim"]
 omit = ["sim/assets/*"]
+
+[tool.ruff]
+# Vendored submodule has its own ruff config and isn't our code to lint.
+# docs/ has historical planning/spec docs with embedded code snippets that
+# are a record of what was done at the time -- not live code to reformat.
+extend-exclude = ["sim/assets/menagerie", "docs"]

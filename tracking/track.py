@@ -1,4 +1,5 @@
 """Track state machine: gating + m/n confirmation logic."""
+
 from collections import deque
 from enum import Enum
 

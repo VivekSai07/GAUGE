@@ -1,4 +1,5 @@
 """Kinematic (joint-velocity) MPC tracking a moving Cartesian target."""
+
 import casadi as ca
 import numpy as np
 
@@ -96,7 +97,9 @@ class KinematicMPC:
             opti.subject_to(opti.bounded(q_min, Q[:, k + 1], q_max))
             opti.subject_to(opti.bounded(-qdot_max, Qdot[:, k], qdot_max))
             ee_pos = fk_func(Q[:, k + 1])
-            cost += ca.sumsqr(ee_pos - target_param) + effort_weight * ca.sumsqr(Qdot[:, k])
+            cost += ca.sumsqr(ee_pos - target_param) + effort_weight * ca.sumsqr(
+                Qdot[:, k]
+            )
             if posture_target is not None and posture_weight > 0.0:
                 cost += posture_weight * ca.sumsqr(Q[:, k + 1] - posture_target)
             if k == horizon - 1 and terminal_weight > 0.0:
@@ -165,7 +168,11 @@ class KinematicMPC:
         self._opti.set_initial(self._Q, q_init)
         self._opti.set_initial(self._Qdot, qdot_init)
         sol = self._opti.solve()
-        self._prev_Q_sol = np.asarray(sol.value(self._Q)).reshape(self.n_joints, self.horizon + 1)
-        self._prev_Qdot_sol = np.asarray(sol.value(self._Qdot)).reshape(self.n_joints, self.horizon)
+        self._prev_Q_sol = np.asarray(sol.value(self._Q)).reshape(
+            self.n_joints, self.horizon + 1
+        )
+        self._prev_Qdot_sol = np.asarray(sol.value(self._Qdot)).reshape(
+            self.n_joints, self.horizon
+        )
         qdot_all = self._prev_Qdot_sol
         return np.asarray(qdot_all[:, 0]).flatten()

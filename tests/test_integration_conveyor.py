@@ -1,4 +1,3 @@
-import numpy as np
 import yaml
 
 from run_conveyor_demo import run_one_episode
