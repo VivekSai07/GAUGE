@@ -15,24 +15,32 @@ plain Python modules wired together in `run_conveyor_demo.py`.
 
 ## Demonstrated result
 
-The Franka genuinely picks up the cube: `run_one_episode()` returns
-`contact_verified: True` — both fingers simultaneously in physical contact
-with the object (MuJoCo's own contact array, not inferred from distance),
-sustained for a real hold, not an instant. Fingertip-to-object accuracy at
-the commit instant is **~3.9cm**, close to the originally-targeted 3cm.
-Verified deterministic and reproducible by
-`tests/test_integration_conveyor.py`.
+The Franka reaches, targets, and closes on the cube with fingertip-to-object
+accuracy at the commit instant of **~3.9cm**, and mechanically registers
+contact (`grasped: True`). But `contact_verified` — checked *after* a real
+~10cm lift, not at the instant the gripper closes — currently reads
+**`False`**: the grasp does not yet survive being lifted. This is an honest,
+verified, currently-open limitation, not an oversight — see below.
 
-Getting here took three rounds of real fixes, not tuning: the conveyor
-object had to become a genuinely physically-simulated body (not a scripted
-ghost immune to contact forces), the MPC needed actual orientation control
-(position-only tracking left the object centered in aggregate distance but
-off the gripper's closing axis), and grip friction needed raising so the
-object didn't slip out under gravity. See
+Getting here took four rounds of real fixes, not tuning. Rounds 1-3: the
+conveyor object had to become a genuinely physically-simulated body (not a
+scripted ghost immune to contact forces), the MPC needed actual orientation
+control (position-only tracking left the object centered in aggregate
+distance but off the gripper's closing axis), and grip friction needed
+raising so the object didn't slip out under gravity — these got a momentary
+contact check to read `True`. Round 4 moved that same check to *after* a
+real lift (the momentary check turned out to be too weak a bar, informed by
+a second working reference implementation's explicit "Verify Lift" step)
+and root-caused, with `systematic-debugging`, exactly why the grasp doesn't
+survive one: a sharp, mechanically-grounded tolerance cliff (~3cm along the
+gripper's closing axis) that this project's current 64×64 RGB-D
+color-segmentation accuracy sits right on top of. See
 [the design spec's Section 12](docs/superpowers/specs/2026-07-29-dynamic-object-tracking-manipulation-design.md#12-demonstrated-accuracy--known-limitation)
-("Round 3" in particular) for the full root-cause story — including why an
-earlier, honestly-measured ~4.4cm accuracy number still described a system
-that had never once picked anything up.
+("Round 4" in particular) for the full root-cause story — eight-plus
+hypotheses tested against real runs, an isolation experiment that pins the
+exact failure threshold, and why an earlier, honestly-measured
+`contact_verified: True` still described a system that would drop the
+object the moment it was picked up.
 
 ## Running it
 
