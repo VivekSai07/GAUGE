@@ -795,3 +795,69 @@ documented, evidenced, open limitation rather than a silently-abandoned
 thread — `contact_verified`/`object_peak_height_gain_m` will continue to
 report it honestly as `False` until one of these is actually done, exactly
 as Round 3 established this project should behave.
+
+### Round 4, continued: three externally-sourced leads, all ruled out
+
+Prompted by external research (three reference repos —
+`Ys-Jia/Adaptive-Grasp-in-Dynamic-Environment`,
+`UT-Austin-RPL/deoxys_control`, `ARISE-Initiative/robomimic` — plus a
+literature-informed summary of common MuJoCo grasp-failure fixes), three
+more concrete, previously-untested hypotheses were run down via three
+parallel research/experiment agents (`dispatching-parallel-agents`) and one
+direct follow-up test. All three were genuinely tested against real runs,
+not dismissed on theory, and all three are now ruled out:
+
+1. **Contact softening/stiffening (`solimp`/`solref`/`condim`).** Neither
+   repo actually solves this problem (`Adaptive-Grasp-in-Dynamic-Environment`
+   has the same blind bang-bang close with no drift compensation;
+   `robomimic` has no MuJoCo models or gripper-closing code of its own — the
+   relevant contact params live in robosuite/mimicgen, out of scope). A
+   direct sweep — 24 configurations across the cube geom, the finger pad
+   geoms, and both together, spanning stiffer/softer `solref`, tighter/looser
+   `solimp`, and `condim` 4/6 — never once flipped the real failure point
+   (3.67cm) to a success, and drift-during-closing showed no reliable,
+   monotonic response to softening. Stacking moderate softening across both
+   surfaces *simultaneously* silently broke the previously-working 0.0cm and
+   3.0cm cases — a regression a naive "soften everything to be safe" fix
+   could easily introduce without noticing.
+2. **Pre-impact velocity matching** (command the arm's TCP to track the
+   object's estimated velocity through the close+settle window, instead of
+   holding still) — motivated by "your end-effector must match the
+   conveyor's velocity vector at contact." Tested with both an oracle
+   (ground-truth velocity) and the real KF estimate, in both an isolated
+   sweep and the full closed-loop pipeline: `contact_verified` was identical
+   with matching on vs. off at every offset from 0 to 6cm, and matching the
+   full 3D velocity (not just the closing axis) actively flipped a
+   boundary-case success into a failure. The diagnosis: the drag during
+   closing is caused by the *fingers'* own closing motion relative to the
+   object as the pads converge, not by the arm base/TCP's translational
+   velocity relative to the belt — matching whole-arm velocity doesn't touch
+   that degree of freedom at all.
+3. **Force/width-plateau grasp commit** (`deoxys_control`'s actual pattern:
+   libfranka's native `grasp()` closes at bounded force and stops on
+   contact/stall, rather than driving to a fixed closed position) —
+   the single most promising lead, since it directly targets "one finger
+   drags a not-quite-centered object." Tested two ways: (a) a kinematic
+   plateau detector (freeze the commanded width once tendon length stops
+   decreasing), which false-triggered on the position servo's own natural
+   deceleration as it approaches any target — including in free air — and
+   broke the previously-reliable 0cm case; (b) genuine MuJoCo contact-force
+   detection (`mj_contactForce` on the object body, swept over six
+   thresholds from 0.01N to 0.5N), which also broke the 0cm case at every
+   threshold. Root cause: for an object this light (0.05kg), *any* stopping
+   point at or near first contact leaves the fingers only lightly touching —
+   not squeezed enough for friction to hold through a lift. Full closure
+   (`ctrl=0`) turns out to be necessary, not merely a naive default; the
+   real failure mode is the object being *pushed out from* an
+   incompletely-centered grip during that full closure, not the closure
+   itself being too aggressive.
+
+**Updated conclusion:** every control-layer and contact-physics lever tried
+— tolerance/debounce tuning, commit-sequence redesign, contact-parameter
+tuning, velocity matching, and contact-triggered closure — either does
+nothing or actively regresses previously-working cases. This is now strong,
+convergent evidence (not a single dead end) that (a) from the "Conclusion,
+not yet fixed" paragraph above — improving segmentation/targeting precision
+itself, or widening the physical margin — is the only remaining path, and
+that further control-strategy tuning at the current precision floor is not
+a productive direction.
