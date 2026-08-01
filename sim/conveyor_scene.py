@@ -379,7 +379,9 @@ class ConveyorSceneEnv:
         mujoco.mj_step(self.model, self.data)
 
     def stop_conveyor_object(self) -> None:
-        """Zero the conveyor object's velocity actuators.
+        """Zero the conveyor object's velocity actuators, and fully disable
+        their force contribution -- a real "detach", not just re-zeroing the
+        commanded velocity.
 
         Found via a user-reported visual grasp failure: these actuators
         (see `reset()`) command a constant velocity for the *entire*
@@ -390,9 +392,26 @@ class ConveyorSceneEnv:
         forces, well after the gripper had closed). A real conveyor would
         exert no more belt-driven force on an object once it's lifted off
         the belt; call this once a grasp is committed to reproduce that.
+
+        Setting `ctrl = 0.0` alone is not enough: a MuJoCo `<velocity>`
+        actuator with `ctrl=0` is still an active brake, applying force
+        proportional to `kv * (0 - qvel)` any time the object has nonzero
+        velocity (with `kv=50` on this 0.05kg object, even 0.05 m/s of
+        lateral motion produces ~2.5N of opposing force -- about 5x the
+        object's own weight). Once the object is genuinely carried during
+        the lift phase, any lateral component of that motion would get
+        fought by this disproportionate brake force. Zeroing
+        `actuator_gainprm[:, 0]` and `actuator_biasprm[:, 2]` directly on
+        the model removes both the `gainprm[0]*ctrl` and `biasprm[2]*qvel`
+        terms MuJoCo's `<velocity>` shorthand compiles to, so the actuator
+        applies exactly zero force from this point on regardless of the
+        object's velocity.
         """
         self.data.ctrl[self._obj_vel_x_id] = 0.0
         self.data.ctrl[self._obj_vel_y_id] = 0.0
+        for actuator_id in (self._obj_vel_x_id, self._obj_vel_y_id):
+            self.model.actuator_gainprm[actuator_id, 0] = 0.0
+            self.model.actuator_biasprm[actuator_id, 2] = 0.0
 
     def is_grasped(self) -> bool:
         """Return True if both fingers are simultaneously in physical

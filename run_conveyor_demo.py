@@ -140,12 +140,21 @@ integration debugging (see task-12-report.md for the full narrative):
     ticks via the same `mpc.solve` used for tracking) and a post-lift
     settle (`_POST_LIFT_SETTLE_STEPS`, gripper still closed) before the
     single `env.is_grasped()` call that now determines `contact_verified`.
-    `object_height_gain_m` -- the object's world-frame Z position after
-    the lift+settle minus its Z position at the grasp-commit instant -- is
-    added to the return value as direct, human-checkable proof that the
-    object was actually carried upward with the gripper, not left behind
-    on the platform while the gripper merely closed around empty space
-    above it.
+    `object_height_gain_m` and `object_peak_height_gain_m` are added to the
+    return value as direct, human-checkable proof that the object was
+    actually carried upward with the gripper, not left behind on the
+    platform while the gripper merely closed around empty space above it.
+    Both are measured relative to the object's world-frame Z position at
+    the grasp-commit instant (captured immediately after `set_gripper` /
+    `stop_conveyor_object`, before the post-grasp settle loop runs --
+    capturing it after that loop would let the object's settle-induced sag
+    silently eat into the baseline). `object_height_gain_m` is the FINAL
+    gain: Z after the full lift+settle minus that baseline -- it can come
+    back down (even below zero) if the object slips after being lifted.
+    `object_peak_height_gain_m` is the highest gain observed at any point
+    during the lift+settle window -- direct proof a genuine lift happened
+    at all, even one that didn't hold; a final-only reading cannot tell
+    "never lifted" apart from "lifted then slipped back down."
 """
 
 import time
@@ -387,6 +396,15 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
             # direct instrumentation). A real conveyor exerts no more
             # belt-driven force once an object is lifted off it.
             env.stop_conveyor_object()
+            # Baseline for the lift-verification height metrics below, taken
+            # at the grasp-commit instant -- i.e. right now, before the
+            # settle loop just below runs. Capturing this AFTER that settle
+            # loop (as an earlier version of this code did) silently
+            # contaminates the baseline: the settle loop lets the object sag
+            # under the closing gripper before the lift even starts, so part
+            # of the real lift ends up hidden inside the "baseline" instead
+            # of counted as gain. See module docstring, point 10.
+            object_pos_before_lift = env.get_object_ground_truth().copy()
             true_obj_pos = env.get_object_ground_truth()
             grasp_error = float(np.linalg.norm(ee_pos - true_obj_pos))
             # Hold the closing command for a few more sim steps so the
@@ -394,9 +412,11 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
             # physics (see _POST_GRASP_SETTLE_STEPS) -- purely cosmetic for
             # a recorded demo; grasp_error was already computed above, at
             # the commit instant, and is unaffected by these extra steps.
+            peak_obj_z = object_pos_before_lift[2]
             for _ in range(_POST_GRASP_SETTLE_STEPS):
                 settle_start = time.perf_counter()
                 env.step(np.zeros(7))
+                peak_obj_z = max(peak_obj_z, float(env.get_object_ground_truth()[2]))
                 if viewer is not None:
                     viewer.sync()
                     remaining = env.dt - (time.perf_counter() - settle_start)
@@ -410,14 +430,26 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
             # afterward -- mirroring the reference repo's "Verify Lift" state
             # -- is the only way to distinguish a genuine grip from one that
             # merely happened to be touching.
-            object_pos_before_lift = env.get_object_ground_truth()
-            lift_target = ee_pos + np.array([0.0, 0.0, _LIFT_HEIGHT_M])
-            for _ in range(_LIFT_CONTROL_TICKS):
+            #
+            # The target is ramped linearly across the ticks (alpha grows
+            # from 1/_LIFT_CONTROL_TICKS to 1.0) rather than fixed at the
+            # full +10cm offset for every tick. A fixed target let the MPC's
+            # terminal_weight drive near-max joint velocity and close ~90% of
+            # the gap in the first ~0.37s, front-loading an unnecessary
+            # inertial load on the grip during the fastest phase of the
+            # motion (measured ~24% grip-force surcharge) instead of the
+            # paced ~2s lift the tick count was sized for.
+            for i in range(_LIFT_CONTROL_TICKS):
+                alpha = (i + 1) / _LIFT_CONTROL_TICKS
+                lift_target = ee_pos + alpha * np.array([0.0, 0.0, _LIFT_HEIGHT_M])
                 q_current = env.get_joint_positions()
                 qdot_cmd = mpc.solve(q_current, lift_target)
                 for _ in range(sim_steps_per_control):
                     lift_start = time.perf_counter()
                     env.step(qdot_cmd)
+                    peak_obj_z = max(
+                        peak_obj_z, float(env.get_object_ground_truth()[2])
+                    )
                     if viewer is not None:
                         viewer.sync()
                         remaining = env.dt - (time.perf_counter() - lift_start)
@@ -427,6 +459,7 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
             for _ in range(_POST_LIFT_SETTLE_STEPS):
                 lift_settle_start = time.perf_counter()
                 env.step(qdot_cmd)
+                peak_obj_z = max(peak_obj_z, float(env.get_object_ground_truth()[2]))
                 if viewer is not None:
                     viewer.sync()
                     remaining = env.dt - (time.perf_counter() - lift_settle_start)
@@ -444,12 +477,14 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
             object_height_gain_m = float(
                 env.get_object_ground_truth()[2] - object_pos_before_lift[2]
             )
+            object_peak_height_gain_m = float(peak_obj_z - object_pos_before_lift[2])
             result = {
                 "grasped": True,
                 "grasp_error_m": grasp_error,
                 "steps": step,
                 "contact_verified": contact_verified,
                 "object_height_gain_m": object_height_gain_m,
+                "object_peak_height_gain_m": object_peak_height_gain_m,
             }
             break
 
@@ -460,6 +495,7 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
             "steps": config["max_steps"],
             "contact_verified": False,
             "object_height_gain_m": None,
+            "object_peak_height_gain_m": None,
         }
 
     if viewer is not None:
