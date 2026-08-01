@@ -57,6 +57,10 @@ jobs:
       # backend that works without a display; osmesa is pure software
       # rendering and needs no GPU/driver, just libosmesa6-dev below.
       MUJOCO_GL: osmesa
+      # Without this, `uv run` re-resolves against .python-version (3.11)
+      # on every invocation, silently swapping the 3.12 leg's venv back to
+      # 3.11 after `uv sync --python 3.12` had already set it up correctly.
+      UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
