@@ -447,7 +447,9 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
                 for _ in range(sim_steps_per_control):
                     lift_start = time.perf_counter()
                     env.step(qdot_cmd)
-                    peak_obj_z = max(peak_obj_z, float(env.get_object_ground_truth()[2]))
+                    peak_obj_z = max(
+                        peak_obj_z, float(env.get_object_ground_truth()[2])
+                    )
                     if viewer is not None:
                         viewer.sync()
                         remaining = env.dt - (time.perf_counter() - lift_start)
