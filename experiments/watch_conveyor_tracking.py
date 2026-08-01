@@ -21,7 +21,13 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
-_BELT_Y_HALF = 0.45  # cube wraps before reaching the camera's FOV edge (~0.577 at this height/fovy)
+# Cube wraps at cube_start[1] + _BELT_Y_HALF*2. Set so it wraps just AFTER
+# rolling over the far roller (confirmed via instrumentation: flat until
+# y~0.53, a real, modest 0-3.5deg tilt crossing the roller at y~0.53-0.58,
+# then it correctly falls off the physical end of the conveyor past y~0.586
+# -- nothing supports it beyond the roller. Wrapping at 0.56 shows the
+# genuine roller interaction on every loop without the fall.
+_BELT_Y_HALF = 0.48
 
 _MODEL_XML = """
 <mujoco>
@@ -31,24 +37,29 @@ _MODEL_XML = """
   <worldbody>
     <geom name="floor" type="plane" size="2 2 0.01" rgba="0.5 0.5 0.5 1"/>
     <camera name="topdown" pos="0.5 0 1.1" euler="0 0 0" fovy="60"/>
-    <!-- contype/conaffinity=0: rollers are visual only (spin for a "real
-         conveyor" look). Their cylinders geometrically overlap the belt
-         surface at each end (radius/length were sized for looks, not
-         clearance) -- with collision left on, the cube runs into a roller
-         near the far end and catastrophically tips (~46 deg, confirmed by
-         direct instrumentation). The cube's actual motion is driven by its
-         own velocity actuator below, not by belt/roller friction, so the
-         rollers don't need to physically interact with anything. -->
-    <body name="roller1" pos="0.5 0.52 0.03" euler="1.5708 0 0">
+    <!-- Real, colliding rollers (previous version disabled collision --
+         a workaround, not a fix, for two real geometry errors below).
+         Error 1: the reference repo's asset moves its object along X, so
+         its roller axis (perpendicular to travel) is Y. Ours moves along
+         Y, but the rotation was copied verbatim, leaving our roller axis
+         parallel to travel instead of perpendicular -- euler="0 1.5708 0"
+         (not "1.5708 0 0") correctly puts the axis along X here. Error 2:
+         radius 0.02 put the roller's top 1cm *above* the belt surface (a
+         wall to slam into, not a rounded end to roll over) -- radius 0.01
+         with the same center height as the belt puts its top exactly
+         flush with the belt surface (both at z=0.04). Positioned right at
+         the belt's Y-ends, so the cube only reaches them at the very end
+         of its travel, not mid-belt. -->
+    <body name="roller1" pos="0.5 0.55 0.03" euler="0 1.5708 0">
       <joint name="roller1_joint" type="hinge" damping="0.01"/>
-      <geom type="cylinder" size="0.02 0.16" rgba="0.2 0.2 0.2 1" contype="0" conaffinity="0"/>
+      <geom type="cylinder" size="0.01 0.16" rgba="0.2 0.2 0.2 1"/>
     </body>
-    <body name="roller2" pos="0.5 -0.52 0.03" euler="1.5708 0 0">
+    <body name="roller2" pos="0.5 -0.55 0.03" euler="0 1.5708 0">
       <joint name="roller2_joint" type="hinge" damping="0.01"/>
-      <geom type="cylinder" size="0.02 0.16" rgba="0.2 0.2 0.2 1" contype="0" conaffinity="0"/>
+      <geom type="cylinder" size="0.01 0.16" rgba="0.2 0.2 0.2 1"/>
     </body>
     <body name="belt" pos="0.5 0 0.03">
-      <geom type="box" size="0.15 0.55 0.01" rgba="0.15 0.15 0.15 1" friction="0.001 0.005 0.001"/>
+      <geom type="box" size="0.15 0.55 0.01" rgba="0.15 0.15 0.15 1" friction="0.05 0.005 0.0001"/>
     </body>
     <body name="cube" pos="0.5 -0.4 0.06">
       <joint name="cube_joint" type="free" damping="0.1"/>
@@ -84,17 +95,19 @@ def main() -> None:
     cube_qpos_addr = model.jnt_qposadr[cube_joint_id]
     cube_start = data.qpos[cube_qpos_addr : cube_qpos_addr + 3].copy()
 
-    # Rollers used to be driven by their own velocity actuator + an
-    # equality constraint syncing them. Confirmed by direct isolation test
-    # (set roller ctrl to 0, cube moved fine; left at its previous value,
-    # cube froze): the thin cylinder's tiny rotational inertia meant the
+    # Rollers now physically collide with the cube (see the XML comment
+    # above) -- but their own SPIN is still driven kinematically (direct
+    # qpos increment), not by a velocity actuator. Rollers used to be
+    # actuator-driven, and that specifically (not the collision) caused a
+    # solver blowup: the thin cylinder's tiny rotational inertia meant the
     # actuator's kv gain demanded an acceleration the solver couldn't
-    # resolve in one step (the "Nan/Inf in QACC at DOF 0" warning), and
-    # that divergence poisoned the whole timestep's solve -- not just the
-    # roller, the cube too. Rollers are purely decorative (the cube's
-    # actual motion comes from cube_vel below), so they're now spun
-    # kinematically -- direct qpos increment, no actuator, no dynamics,
-    # no way to destabilize anything else.
+    # resolve in one step ("Nan/Inf in QACC at DOF 0"), and that single
+    # DOF's divergence poisoned the whole timestep's solve -- froze the
+    # cube too, confirmed by direct isolation test (roller ctrl=0: cube
+    # moved fine; roller ctrl active: cube froze). The visual spin doesn't
+    # need real dynamics, so it's kinematic; the cube's collision with the
+    # roller's actual geometry is real physics, computed by the solver
+    # exactly like any other contact.
     roller1_qpos_addr = model.jnt_qposadr[model.body("roller1").jntadr[0]]
     roller2_qpos_addr = model.jnt_qposadr[model.body("roller2").jntadr[0]]
     roller_spin_rate = 4.0  # rad/s, visual only
