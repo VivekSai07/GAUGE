@@ -14,6 +14,7 @@ wouldn't be importable; verified via `ModuleNotFoundError: No module named
 generate_dataset.py` form):
     uv run --group yolo-precision python -m experiments.yolo_precision.generate_dataset
 """
+
 import argparse
 from pathlib import Path
 
@@ -43,7 +44,9 @@ def _cube_corners_world(center: np.ndarray, yaw: float) -> np.ndarray:
     rotation about world Z (a fresh-placed/reset object can land at any
     yaw; this is not the tilt-buildup bug tracked separately in the design
     spec's Round 4 -- pure yaw variety is realistic and desired here)."""
-    signs = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
+    signs = np.array(
+        [[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]
+    )
     local_corners = signs * OBJECT_HALF_HEIGHT_M
     c, s = np.cos(yaw), np.sin(yaw)
     rot = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
@@ -63,7 +66,9 @@ def _world_to_pixel(point_world, cam_pos, cam_mat, fx, fy, cx, cy):
     return u, v
 
 
-def sample_frame(env: ConveyorSceneEnv, rng: np.random.Generator, width: int = 64, height: int = 64) -> dict | None:
+def sample_frame(
+    env: ConveyorSceneEnv, rng: np.random.Generator, width: int = 64, height: int = 64
+) -> dict | None:
     """Place the cube at a random pose, render, and compute its exact pixel
     bounding box. Returns None if the box degenerates (fully clipped or
     behind the camera) -- callers should retry with a new sample."""
@@ -77,7 +82,12 @@ def sample_frame(env: ConveyorSceneEnv, rng: np.random.Generator, width: int = 6
 
     env.data.qpos[obj_qpos_addr : obj_qpos_addr + 3] = center
     half_yaw = yaw / 2.0
-    env.data.qpos[obj_qpos_addr + 3 : obj_qpos_addr + 7] = [np.cos(half_yaw), 0.0, 0.0, np.sin(half_yaw)]
+    env.data.qpos[obj_qpos_addr + 3 : obj_qpos_addr + 7] = [
+        np.cos(half_yaw),
+        0.0,
+        0.0,
+        np.sin(half_yaw),
+    ]
     env.data.qvel[:] = 0
     mujoco.mj_forward(env.model, env.data)
 
@@ -100,7 +110,11 @@ def sample_frame(env: ConveyorSceneEnv, rng: np.random.Generator, width: int = 6
     if x_max <= x_min or y_max <= y_min:
         return None
 
-    return {"rgb": rgb, "bbox_px": (x_min, y_min, x_max, y_max), "world_pos": center.copy()}
+    return {
+        "rgb": rgb,
+        "bbox_px": (x_min, y_min, x_max, y_max),
+        "world_pos": center.copy(),
+    }
 
 
 def _write_yolo_label(path: Path, bbox_px, width: int, height: int) -> None:
@@ -123,7 +137,9 @@ def _generate_split(env, rng, split: str, count: int, width: int, height: int) -
     while written < count:
         attempts += 1
         if attempts > count * 10:
-            raise RuntimeError(f"Too many degenerate samples generating '{split}' split -- check camera/range setup.")
+            raise RuntimeError(
+                f"Too many degenerate samples generating '{split}' split -- check camera/range setup."
+            )
         sample = sample_frame(env, rng, width, height)
         if sample is None:
             continue
@@ -134,7 +150,7 @@ def _generate_split(env, rng, split: str, count: int, width: int, height: int) -
         written += 1
 
 
-def _write_data_yaml(width: int, height: int) -> None:
+def _write_data_yaml() -> None:
     yaml_text = (
         f"path: {_DATASET_DIR.resolve()}\n"
         "train: train/images\n"
@@ -160,7 +176,9 @@ def _write_preview(env, rng, count: int, width: int, height: int) -> None:
         if sample is None:
             continue
         bgr = cv2.cvtColor(sample["rgb"], cv2.COLOR_RGB2BGR)
-        scaled = cv2.resize(bgr, (width * 6, height * 6), interpolation=cv2.INTER_NEAREST)
+        scaled = cv2.resize(
+            bgr, (width * 6, height * 6), interpolation=cv2.INTER_NEAREST
+        )
         x_min, y_min, x_max, y_max = sample["bbox_px"]
         cv2.rectangle(
             scaled,
@@ -188,10 +206,12 @@ def main() -> None:
     env.reset()
     rng = np.random.default_rng(args.seed)
 
-    print(f"Generating {args.train_count} train + {args.val_count} val frames at {args.width}x{args.height}...")
+    print(
+        f"Generating {args.train_count} train + {args.val_count} val frames at {args.width}x{args.height}..."
+    )
     _generate_split(env, rng, "train", args.train_count, args.width, args.height)
     _generate_split(env, rng, "val", args.val_count, args.width, args.height)
-    _write_data_yaml(args.width, args.height)
+    _write_data_yaml()
     print(f"Dataset written to {_DATASET_DIR}")
 
     if args.preview_count > 0:
