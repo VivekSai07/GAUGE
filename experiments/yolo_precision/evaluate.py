@@ -41,7 +41,16 @@ def _yolo_bbox_center_to_3d(model, rgb, depth, intrinsics, cam_pos, cam_mat):
     y0, y1 = int(max(0, y_min)), int(min(depth.shape[0], y_max + 1))
     x0, x1 = int(max(0, x_min)), int(min(depth.shape[1], x_max + 1))
     region = depth[y0:y1, x0:x1]
-    z = float(region.mean()) + OBJECT_HALF_HEIGHT_M
+    # Robust inlier filtering: background/platform pixels inside a
+    # non-axis-aligned box's corners have depth far from the cube's own
+    # depth cluster -- reject anything farther than the cube's own
+    # half-extent from the region's median before averaging, instead of
+    # blindly averaging the whole box (which the original NO-GO measurement
+    # showed pulls the estimate toward the background for rotated cubes).
+    median_depth = float(np.median(region))
+    inliers = region[np.abs(region - median_depth) < OBJECT_HALF_HEIGHT_M]
+    z = float(inliers.mean()) if inliers.size > 0 else median_depth
+    z += OBJECT_HALF_HEIGHT_M
     point_cam = intrinsics.deproject(u, v, z)
     return _camera_point_to_world(point_cam, cam_pos, cam_mat), (x_min, y_min, x_max, y_max)
 
