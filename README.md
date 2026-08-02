@@ -1,6 +1,12 @@
 # GAUGE — Gated Uncertainty-Aware Grasping Engine
 
 [![CI](https://github.com/VivekSai07/GAUGE/actions/workflows/ci.yml/badge.svg)](https://github.com/VivekSai07/GAUGE/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/VivekSai07/GAUGE/actions/workflows/codeql.yml/badge.svg)](https://github.com/VivekSai07/GAUGE/actions/workflows/codeql.yml)
+[![Last commit](https://img.shields.io/github/last-commit/VivekSai07/GAUGE)](https://github.com/VivekSai07/GAUGE/commits/main)
+[![Commit activity](https://img.shields.io/github/commit-activity/m/VivekSai07/GAUGE)](https://github.com/VivekSai07/GAUGE/pulse)
+[![Issues closed](https://img.shields.io/github/issues-closed/VivekSai07/GAUGE?color=success)](https://github.com/VivekSai07/GAUGE/issues?q=is%3Aissue+is%3Aclosed)
+[![Open issues](https://img.shields.io/github/issues/VivekSai07/GAUGE)](https://github.com/VivekSai07/GAUGE/issues)
+[![Lines of code](https://tokei.rs/b1/github/VivekSai07/GAUGE)](https://github.com/VivekSai07/GAUGE)
 
 A MuJoCo-simulated Franka Panda arm with an eye-in-hand RGB-D camera that
 detects, tracks (Kalman filter with Mahalanobis gating and m/n track
@@ -8,6 +14,18 @@ confirmation), predicts, computes a closed-form interception point for, and
 grasps an object moving at constant velocity on a conveyor belt — a personal
 project applying object-tracking coursework (KF/EKF/UKF, gating, track
 initiation, m/n logic) to robotic manipulation.
+
+Every badge above is live (pulled from GitHub/tokei on page load, not a
+snapshot) — the closed-issue count and commit-activity graph are the
+fastest way to see this project is under active, iterative development
+rather than a one-shot upload. For the actual development history — what
+was tried, what broke, what got root-caused and fixed, in order — see the
+[Milestones](https://github.com/VivekSai07/GAUGE/milestones) and
+[Issues](https://github.com/VivekSai07/GAUGE/issues?q=is%3Aissue) pages:
+each milestone groups a coherent round of work (MVP build-out, accuracy
+fixes, CI/CD hardening, physical-grasp debugging, a YOLO precision
+experiment), and every issue documents a real, verified finding, not
+retroactive busywork.
 
 Pure Python, no ROS2/C++/Pinocchio/acados: perception, tracking, prediction,
 interception planning, and control (a kinematic MPC via CasADi + IPOPT) are
