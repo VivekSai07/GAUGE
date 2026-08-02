@@ -40,16 +40,23 @@ def _yolo_bbox_center_to_3d(model, rgb, depth, intrinsics, cam_pos, cam_mat):
     v = (y_min + y_max) / 2.0
     y0, y1 = int(max(0, y_min)), int(min(depth.shape[0], y_max + 1))
     x0, x1 = int(max(0, x_min)), int(min(depth.shape[1], x_max + 1))
-    region = depth[y0:y1, x0:x1]
-    # Robust inlier filtering: background/platform pixels inside a
-    # non-axis-aligned box's corners have depth far from the cube's own
-    # depth cluster -- reject anything farther than the cube's own
-    # half-extent from the region's median before averaging, instead of
-    # blindly averaging the whole box (which the original NO-GO measurement
-    # showed pulls the estimate toward the background for rotated cubes).
-    median_depth = float(np.median(region))
-    inliers = region[np.abs(region - median_depth) < OBJECT_HALF_HEIGHT_M]
-    z = float(inliers.mean()) if inliers.size > 0 else median_depth
+    region_rgb = rgb[y0:y1, x0:x1]
+    region_depth = depth[y0:y1, x0:x1]
+    # Combine YOLO's box (tight, reliable localization -- 0 misses vs. the
+    # baseline's 9) with the baseline's own proven depth-sampling approach
+    # (only average depth over pixels that actually match the cube's
+    # color), scoped to the YOLO box instead of the whole frame. Two prior
+    # attempts (full-box mean, then median-distance inlier filtering) both
+    # failed because a rotated square's own bounding box can have enough
+    # of its area be background that purely-geometric filtering can't
+    # separate cube pixels from background pixels -- color can.
+    lower = np.array(_COLOR_LOWER, dtype=np.uint8)
+    upper = np.array(_COLOR_UPPER, dtype=np.uint8)
+    mask = np.all((region_rgb >= lower) & (region_rgb <= upper), axis=-1)
+    if mask.sum() > 0:
+        z = float(region_depth[mask].mean())
+    else:
+        z = float(region_depth.mean())
     z += OBJECT_HALF_HEIGHT_M
     point_cam = intrinsics.deproject(u, v, z)
     return _camera_point_to_world(point_cam, cam_pos, cam_mat), (x_min, y_min, x_max, y_max)
