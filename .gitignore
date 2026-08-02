@@ -4,3 +4,5 @@ __pycache__/
 logs/
 .coverage
 experiments/yolo_precision/data/
+*.pt
+runs/
