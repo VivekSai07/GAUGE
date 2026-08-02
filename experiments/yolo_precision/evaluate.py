@@ -53,11 +53,9 @@ def _yolo_bbox_center_to_3d(model, rgb, depth, intrinsics, cam_pos, cam_mat):
     lower = np.array(_COLOR_LOWER, dtype=np.uint8)
     upper = np.array(_COLOR_UPPER, dtype=np.uint8)
     mask = np.all((region_rgb >= lower) & (region_rgb <= upper), axis=-1)
-    if mask.sum() > 0:
-        z = float(region_depth[mask].mean())
-    else:
-        z = float(region_depth.mean())
-    z += OBJECT_HALF_HEIGHT_M
+    if mask.sum() == 0:
+        return None
+    z = float(region_depth[mask].mean()) + OBJECT_HALF_HEIGHT_M
     point_cam = intrinsics.deproject(u, v, z)
     return _camera_point_to_world(point_cam, cam_pos, cam_mat), (x_min, y_min, x_max, y_max)
 
