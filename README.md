@@ -29,7 +29,11 @@ retroactive busywork.
 
 Pure Python, no ROS2/C++/Pinocchio/acados: perception, tracking, prediction,
 interception planning, and control (a kinematic MPC via CasADi + IPOPT) are
-plain Python modules wired together in `run_conveyor_demo.py`.
+plain Python modules wired together in `run_conveyor_demo.py`. Perception's
+default path now uses a fine-tuned YOLO detector (see Round 5 below), so
+`torch`/`ultralytics` are real dependencies — this is no longer a GPU-free,
+ML-free stack, even though the rest of it still has no ROS2/C++/Pinocchio/
+acados.
 
 ## Demonstrated result
 
@@ -63,7 +67,13 @@ gain, and **not enough to flip `contact_verified` to `True`**: a fresh full
 run still reports `contact_verified: False`
 (`{'grasped': True, 'grasp_error_m': 0.0377, 'contact_verified': False,
 'object_height_gain_m': 0.0264, 'object_peak_height_gain_m': 0.0327}`).
-Better perception alone does not close the gap; see
+One metric moved the other way: `object_height_gain_m` — the *final* lift
+height, as opposed to `object_peak_height_gain_m`'s highest point reached —
+went from **0.02798 to 0.02640** (~5.6% worse). That's itself informative
+rather than a contradiction: a higher peak paired with a lower final gain is
+consistent with the object being lifted slightly higher and then slipping,
+supporting the same "the grasp doesn't hold" story Round 4 already
+established. Better perception alone does not close the gap; see
 [the design spec's Section 12](docs/superpowers/specs/2026-07-29-dynamic-object-tracking-manipulation-design.md#12-demonstrated-accuracy--known-limitation)
 ("Round 4" and "Round 5" in particular) for the full root-cause story —
 eight-plus hypotheses tested against real runs, an isolation experiment that
@@ -81,10 +91,16 @@ uv run python run_conveyor_demo.py     # one closed-loop episode, headless
 uv run python run_conveyor_demo.py --render   # same, with a live viewer window
 ```
 
+`uv sync` pulls in `torch`/`ultralytics`; no separate download step is
+needed beyond that — perception loads the committed checkpoint at
+`perception/models/cube_detector.pt` directly.
+
 ## Project structure
 
 ```
-perception/     RGB-D -> 3D centroid (classical color/depth segmentation)
+perception/     RGB-D -> 3D centroid: classical color/depth segmentation
+                (still present, still tested) plus a YOLO-detected-box +
+                color-gated-depth hybrid, now the default
 tracking/       Constant-velocity Kalman filter, gating, m/n confirmation
 prediction/     Forward propagation of state + covariance
 planning/       Closed-form interception solver

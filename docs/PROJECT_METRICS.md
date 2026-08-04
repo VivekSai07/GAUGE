@@ -28,6 +28,7 @@ A number from one is never presented as evidence for the other below.
 | 1 | [MVP Pipeline](https://github.com/VivekSai07/GAUGE/milestone/1) | First end-to-end closed loop (perception → tracking → prediction → planning → control → grasp) | ~7.1cm |
 | 2 | [Accuracy Improvements](https://github.com/VivekSai07/GAUGE/milestone/2) | Conveyor object switched from a scripted `mocap` ghost to a real physics body ([#6](https://github.com/VivekSai07/GAUGE/issues/6)); smoothed MPC approach target; TCP-consistent (not flange-consistent) grasp targeting | 7.1cm → 4.4cm |
 | 3 | [Round 3: Physical Grasp Debugging](https://github.com/VivekSai07/GAUGE/milestone/4) | Orientation-aware MPC cost term (penalizes offset along the gripper's non-correctable local X axis) ([#10](https://github.com/VivekSai07/GAUGE/issues/10)); real contact check via MuJoCo's own contact array (both fingers simultaneously, not inferred from distance) | 4.4cm → 3.9cm, `contact_verified: True`* |
+| 5 | YOLO Perception Integration | Color-threshold `segment_object_centroid` swapped for the validated YOLO-detected-box + color-gated-depth `yolo_centroid` at the real pipeline's single perception call site — see [design spec, Round 5](superpowers/specs/2026-07-29-dynamic-object-tracking-manipulation-design.md#round-5-better-perception-alone-did-not-close-the-gap) | 3.9cm → 3.77cm, `contact_verified: False` (unchanged) |
 
 \* Round 3's `contact_verified: True` was checked immediately after the
 gripper closed — proving momentary contact, not a real hold. Round 4
@@ -161,6 +162,11 @@ a mechanical contact check is no longer treated as proof of a hold.
 
 **Open:** the grasp does not yet survive a real lift in the full closed
 loop, root-caused to a ~3cm targeting-precision cliff rather than a
-control-strategy bug. Whether the validated YOLO detector actually closes
-that gap when wired into the real pipeline is the next experiment — not
-yet run.
+control-strategy bug. The validated YOLO detector has now been wired into
+the real pipeline (Round 5): `grasp_error_m` moved 0.0394 → 0.0377 and
+`object_peak_height_gain_m` moved 0.0300 → 0.0327 — real but small gains.
+`contact_verified` is still `False`. Better perception alone does not
+close the gap; the concrete next hypothesis is the KF/prediction-smoothing
+layer — re-tune or bypass the KF blend for the final-approach
+re-measurement now that the raw measurement itself is meaningfully
+better.

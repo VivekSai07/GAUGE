@@ -895,7 +895,13 @@ Against the Round 4 baseline (`grasp_error_m` ~0.039, `object_peak_height_gain_m
 `grasp_error_m` 0.039 → 0.0377 (~3% better) and `object_peak_height_gain_m`
 0.03 → 0.0327 (also marginally better, still well short of the 0.05
 threshold `test_conveyor_episode_grasps_within_tolerance` actually requires
-for a verified lift). **This is a genuine,
+for a verified lift). `object_height_gain_m` — the *final* lift height
+rather than the peak — moved the other way, 0.02798 → 0.02640 (~5.6%
+worse). That's not a contradiction: a slightly higher peak paired with a
+slightly lower final gain is consistent with the object being lifted a bit
+higher and then slipping, which is itself supporting evidence for the
+"the grasp doesn't hold" story Round 4 already established, not a new one.
+**This is a genuine,
 informative negative result, not a wiring bug** — the isolated validation
 experiment and this integration were reviewed independently and both hold
 up. It means the ~2-3cm cliff is not, in fact, primarily explained by the
