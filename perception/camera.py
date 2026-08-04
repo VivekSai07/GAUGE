@@ -12,3 +12,15 @@ class CameraIntrinsics:
         y = (v - self.cy) * depth / self.fy
         z = depth
         return np.array([x, y, z], dtype=np.float64)
+
+
+def camera_point_to_world(
+    point_cam: np.ndarray, cam_pos: np.ndarray, cam_mat: np.ndarray
+) -> np.ndarray:
+    """Transform a point from the pinhole camera frame (x=right, y=down,
+    z=forward-depth) into world coordinates, given the camera's world
+    position and its local-axes-in-world rotation matrix (MuJoCo's
+    `cam_xmat`, reshaped to 3x3, columns = local x/y/z in world frame).
+    """
+    point_local = np.array([point_cam[0], -point_cam[1], -point_cam[2]])
+    return cam_pos + cam_mat @ point_local

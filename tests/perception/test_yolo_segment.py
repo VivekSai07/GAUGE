@@ -3,7 +3,6 @@ import numpy as np
 
 from perception.camera import CameraIntrinsics
 from perception.yolo_segment import MODEL_PATH, yolo_centroid
-from run_conveyor_demo import _camera_point_to_world
 from sim.conveyor_scene import OBJECT_HALF_HEIGHT_M, ConveyorSceneEnv
 
 
@@ -31,29 +30,28 @@ def test_yolo_centroid_finds_cube_near_ground_truth():
     rgb, depth = env.get_rgbd(64, 64)
     fx, fy, cx, cy = env.camera_intrinsics(64, 64)
     intrinsics = CameraIntrinsics(fx, fy, cx, cy)
+    cam_id = env.model.camera("wrist_cam").id
+    cam_pos = env.data.cam_xpos[cam_id].copy()
+    cam_mat = env.data.cam_xmat[cam_id].reshape(3, 3).copy()
 
-    result_cam = yolo_centroid(
+    # yolo_centroid, unlike perception.segment.segment_object_centroid,
+    # returns a point already in world coordinates -- it needs the camera
+    # pose internally to apply the world-Z depth_bias offset (design spec
+    # 2.3), so it takes cam_pos/cam_mat and does the camera->world
+    # transform itself instead of leaving it to the caller.
+    result = yolo_centroid(
         rgb,
         depth,
         model,
         intrinsics,
         color_lower=(150, 0, 0),
         color_upper=(255, 80, 80),
+        cam_pos=cam_pos,
+        cam_mat=cam_mat,
         depth_bias=OBJECT_HALF_HEIGHT_M,
     )
 
-    assert result_cam is not None
-    # yolo_centroid, like perception.segment.segment_object_centroid, returns
-    # a point in the pinhole camera frame -- every existing caller
-    # (experiments/yolo_precision/evaluate.py, run_conveyor_demo.py) converts
-    # to world coordinates via _camera_point_to_world before comparing
-    # against ground truth, since wrist_cam moves with the arm and isn't at
-    # the world origin.
-    cam_id = env.model.camera("wrist_cam").id
-    cam_pos = env.data.cam_xpos[cam_id].copy()
-    cam_mat = env.data.cam_xmat[cam_id].reshape(3, 3).copy()
-    result = _camera_point_to_world(result_cam, cam_pos, cam_mat)
-
+    assert result is not None
     truth = env.get_object_ground_truth()
     np.testing.assert_allclose(result, truth, atol=0.05)
 
@@ -66,6 +64,8 @@ def test_yolo_centroid_returns_none_when_no_cube_in_view():
     depth = np.full((64, 64), 1.5, dtype=np.float32)
     intrinsics = CameraIntrinsics(fx=64.0, fy=64.0, cx=32.0, cy=32.0)
 
+    # No detection means the function returns before touching cam_pos/cam_mat
+    # at all, so their values here are irrelevant -- dummies are fine.
     result = yolo_centroid(
         rgb,
         depth,
@@ -73,6 +73,8 @@ def test_yolo_centroid_returns_none_when_no_cube_in_view():
         intrinsics,
         color_lower=(150, 0, 0),
         color_upper=(255, 80, 80),
+        cam_pos=np.zeros(3),
+        cam_mat=np.eye(3),
     )
     assert result is None
 
@@ -94,6 +96,9 @@ def test_yolo_centroid_returns_none_when_box_found_but_color_mask_empty():
     rgb, depth = env.get_rgbd(64, 64)
     fx, fy, cx, cy = env.camera_intrinsics(64, 64)
     intrinsics = CameraIntrinsics(fx, fy, cx, cy)
+    cam_id = env.model.camera("wrist_cam").id
+    cam_pos = env.data.cam_xpos[cam_id].copy()
+    cam_mat = env.data.cam_xmat[cam_id].reshape(3, 3).copy()
 
     # Prove the detector actually found something, so the None checked
     # below can only have come from the color-mask branch, not this one.
@@ -107,5 +112,41 @@ def test_yolo_centroid_returns_none_when_box_found_but_color_mask_empty():
         intrinsics,
         color_lower=(0, 200, 0),
         color_upper=(0, 255, 0),
+        cam_pos=cam_pos,
+        cam_mat=cam_mat,
     )
     assert result is None
+
+
+def test_yolo_centroid_rejects_border_clipped_detection():
+    """A detection touching the image edge has a provably unreliable
+    centroid: the object's true centre projects off-image and the measured
+    centroid is clamped inward (design spec 2.2 -- measured max residual
+    11.2mm vs 2.5mm once rejected). Treat it as a miss."""
+    from ultralytics import YOLO
+
+    env = ConveyorSceneEnv(conveyor_velocity=np.array([0.0, 0.08, 0.0]))
+    env.reset()
+    # y = -0.20 puts the cube at the very edge of the wrist camera's view.
+    _place_cube_in_view(env, x=0.5, y=-0.20, z=0.05)
+    model = YOLO(str(MODEL_PATH))
+    rgb, depth = env.get_rgbd(64, 64)
+    fx, fy, cx, cy = env.camera_intrinsics(64, 64)
+    intrinsics = CameraIntrinsics(fx, fy, cx, cy)
+    cam_id = env.model.camera("wrist_cam").id
+    cam_pos = env.data.cam_xpos[cam_id].copy()
+    cam_mat = env.data.cam_xmat[cam_id].reshape(3, 3).copy()
+    args = (
+        rgb,
+        depth,
+        model,
+        intrinsics,
+        (150, 0, 0),
+        (255, 80, 80),
+        cam_pos,
+        cam_mat,
+    )
+    assert (
+        yolo_centroid(*args, depth_bias=OBJECT_HALF_HEIGHT_M, reject_border=True)
+        is None
+    )

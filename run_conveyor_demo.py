@@ -179,7 +179,7 @@ from control.panda_kinematics import (
     panda_tcp_symbolic,
 )
 from manipulation.grasp import GraspExecutor
-from perception.camera import CameraIntrinsics
+from perception.camera import CameraIntrinsics, camera_point_to_world
 from perception.yolo_segment import MODEL_PATH, yolo_centroid
 from planning.intercept import solve_intercept
 from sim.conveyor_scene import OBJECT_HALF_HEIGHT_M, ConveyorSceneEnv
@@ -215,16 +215,12 @@ _LIFT_CONTROL_TICKS = 40
 _POST_LIFT_SETTLE_STEPS = 200
 
 
-def _camera_point_to_world(
-    point_cam: np.ndarray, cam_pos: np.ndarray, cam_mat: np.ndarray
-) -> np.ndarray:
-    """Transform a point from the pinhole camera frame (x=right, y=down,
-    z=forward-depth) into world coordinates, given the camera's world
-    position and its local-axes-in-world rotation matrix (MuJoCo's
-    `cam_xmat`, reshaped to 3x3, columns = local x/y/z in world frame).
-    """
-    point_local = np.array([point_cam[0], -point_cam[1], -point_cam[2]])
-    return cam_pos + cam_mat @ point_local
+# Moved to perception/camera.py as the public `camera_point_to_world` (see
+# design spec docs/superpowers/specs/2026-08-04-rendezvous-grasp-design.md
+# Section 3.1) -- yolo_centroid now needs it internally to return a
+# world-frame point directly. Aliased here so this module's other call
+# sites don't need touching.
+_camera_point_to_world = camera_point_to_world
 
 
 def run_one_episode(config: dict, render: bool = False) -> dict:
@@ -308,21 +304,19 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
             continue
 
         rgb, depth = env.get_rgbd(cam_cfg["width"], cam_cfg["height"])
-        measurement_cam = yolo_centroid(
+        cam_pos = env.data.cam_xpos[cam_id]
+        cam_mat = env.data.cam_xmat[cam_id].reshape(3, 3)
+        measurement = yolo_centroid(
             rgb,
             depth,
             detector,
             intrinsics,
             tuple(cam_cfg["color_lower"]),
             tuple(cam_cfg["color_upper"]),
+            cam_pos,
+            cam_mat,
             depth_bias=OBJECT_HALF_HEIGHT_M,
         )
-        if measurement_cam is None:
-            measurement = None
-        else:
-            cam_pos = env.data.cam_xpos[cam_id]
-            cam_mat = env.data.cam_xmat[cam_id].reshape(3, 3)
-            measurement = _camera_point_to_world(measurement_cam, cam_pos, cam_mat)
 
         if track is None and measurement is not None:
             kf = ConstantVelocityKF(
