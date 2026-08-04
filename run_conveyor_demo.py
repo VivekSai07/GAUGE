@@ -163,6 +163,47 @@ integration debugging (see task-12-report.md for the full narrative):
     Validated in isolation to cut mean 3D localization error 43.8%
     (docs/superpowers/specs/2026-08-02-yolo-detector-precision-validation-design.md,
     Section 7) before being wired in here.
+12. Pursuit replaced with a rendezvous phase machine (design spec
+    docs/superpowers/specs/2026-08-04-rendezvous-grasp-design.md, Sections
+    2.1/3.2). An error-budget decomposition at the grasp-commit instant,
+    along the gripper's closing axis, found the arm itself -- not
+    perception -- responsible for 82% of the total error (-0.0270m of
+    -0.0330m). Root cause: chasing the object's live estimate and
+    committing on proximity is pursuit, and pursuit measurably never
+    converges here (best transient approach 3.15cm, then falling behind
+    to a 5-8cm steady state), so the commit fired mid-motion
+    (`|qdot| = 0.43 rad/s`) and the arm coasted a further ~2cm into the
+    object during the finger-close window.
+    Fix: `run_one_episode` now runs four phases -- TRACK (hold still until
+    CONFIRMED with a usable velocity estimate), GOTO (drive to a
+    rendezvous point placed `speed * _RENDEZVOUS_TIME_BUDGET_S` ahead of
+    the object on its predicted path, at the known cube-center height
+    `_GRASP_Z`; horizontal velocity only -- a nonzero z estimate is noise,
+    not real vertical motion, and extrapolating it shifted an earlier
+    rendezvous point 1.9cm too high), WAIT (arm fully stopped, gripper
+    open, dead-reckoning the object from the last verified measurement),
+    and the close trigger (fires when the dead-reckoned object position
+    crosses the TCP along the gripper's closing axis, `_CLOSE_LEAD_S`
+    ahead to cover finger-closing dead time). The steering target (the
+    rendezvous point) and the close trigger (distance to the object
+    itself) are deliberately decoupled -- conflating them made an earlier
+    lead-compensation attempt worse, since the arm would then commit at
+    the lead point, ahead of the cube, instead of where the cube actually
+    is. `solve_intercept`/`GraspExecutor`/`EE_MAX_SPEED`/`_CLOSE_RANGE_M`
+    are no longer used by this loop (their modules are untouched --
+    other callers/tests still use them).
+    Measured with the prototype (design spec Section 4, `configs/
+    conveyor.yaml`'s 0.08 m/s): `grasp_error_m` 0.0377 -> 0.0135,
+    `finger_gap` 0.0075 (closed past the cube) -> 0.042 (genuine
+    capture), `object_peak_height_gain_m` 0.033 -> 0.090,
+    `contact_verified` False -> True -- the first real grasp since
+    Round 4. Known limitation (design spec Section 5, not hidden): the
+    wrist camera sees nothing during the final WAIT (0% detection once
+    border-clipped detections are rejected), so the close trigger runs on
+    pure dead-reckoning; this currently passes at 4 of 6 tested conveyor
+    speeds (0.06/0.08/0.10/0.12 m/s pass, 0.04/0.05 fail) -- a
+    sensing-coverage gap, not a tuning one. The project's configured speed
+    (0.08 m/s) passes.
 """
 
 import time
@@ -175,27 +216,30 @@ from ultralytics import YOLO
 from control.mpc import KinematicMPC
 from control.panda_kinematics import (
     panda_tcp_numpy,
+    panda_tcp_pose_numpy,
     panda_tcp_pose_symbolic,
     panda_tcp_symbolic,
 )
-from manipulation.grasp import GraspExecutor
 from perception.camera import CameraIntrinsics, camera_point_to_world
 from perception.yolo_segment import MODEL_PATH, yolo_centroid
-from planning.intercept import solve_intercept
 from sim.conveyor_scene import OBJECT_HALF_HEIGHT_M, ConveyorSceneEnv
 from tracking.kf import ConstantVelocityKF
 from tracking.track import Track, TrackStatus
 
-# Used only for the long-range leg of the approach (see module docstring,
-# point 4) -- a conservative Cartesian speed estimate for the reachability
-# check in solve_intercept, well below qdot_max's raw joint-space bound to
-# avoid over-projecting the rendezvous point past what the arm can actually
-# achieve in practice.
-EE_MAX_SPEED = 0.2
-# Below this remaining distance, solve_intercept's quadratic becomes
-# ill-conditioned (see module docstring, point 4); switch to direct live
-# tracking instead.
-_CLOSE_RANGE_M = 0.15
+# Rendezvous approach (design spec 2.1/3.2). The arm parks AHEAD of the
+# object on its path and lets it arrive, rather than chasing it: measured
+# with pursuit, the arm never converges (best approach 3.15cm, falling
+# behind to a 5-8cm steady state), so the commit necessarily fired while
+# the arm was still moving and it then coasted ~2cm into the object.
+_PLATFORM_TOP_Z = 0.03  # sim/conveyor_scene.py's platform top
+_GRASP_Z = _PLATFORM_TOP_Z + OBJECT_HALF_HEIGHT_M  # cube centre height
+_RENDEZVOUS_TIME_BUDGET_S = 3.0  # object-travel time placed ahead of it
+_SETTLE_TOL_M = 0.008
+_GOTO_TIMEOUT_S = 4.0
+_GOTO_STALL_QDOT = 0.05
+_GOTO_STALL_DIST_M = 0.03
+_CLOSE_LEAD_S = 0.05  # finger-closing dead time
+
 # Extra sim steps held after the gripper-close command, purely so the
 # commanded closing motion actually plays out in the physics (long enough to
 # fully close: fingers take ~200 steps to reach the closed ctrlrange) instead
@@ -253,7 +297,6 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
     q_min = env.model.jnt_range[:7, 0].copy()
     q_max = env.model.jnt_range[:7, 1].copy()
     q_home = env.get_joint_positions().copy()
-    home_ee_xy = panda_tcp_numpy(q_home)[:2].copy()
 
     fk = panda_tcp_symbolic()
     pose_fk = panda_tcp_pose_symbolic()
@@ -271,20 +314,17 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
         pose_fk_func=pose_fk,
         lateral_axis_weight=mpc_cfg.get("lateral_axis_weight", 0.0),
     )
-    grasp_executor = GraspExecutor(
-        position_tolerance=config["grasp"]["position_tolerance"],
-        # Optional covariance-gated commit (design spec Section 2/3.4's core
-        # novelty axis) -- off by default (None) unless configs/conveyor.yaml
-        # sets `grasp.cov_threshold`, so the shipped, already-tuned accuracy
-        # figures in Section 12 are completely unaffected unless someone
-        # deliberately opts in.
-        cov_threshold=config["grasp"].get("cov_threshold"),
-    )
 
     sim_steps_per_control = max(1, round((1.0 / config["control_hz"]) / config["dt"]))
     qdot_cmd = np.zeros(7)
-    moving = False
     result = None
+    phase = "TRACK"
+    rendezvous = None
+    goto_ticks = 0
+    prev_offset = None
+    last_meas = None
+    last_meas_t = None
+    tick_dt = 1.0 / config["control_hz"]
 
     for step in range(config["max_steps"]):
         if viewer is not None and not viewer.is_running():
@@ -317,6 +357,9 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
             cam_mat,
             depth_bias=OBJECT_HALF_HEIGHT_M,
         )
+        if measurement is not None:
+            last_meas = measurement
+            last_meas_t = step * config["dt"]
 
         if track is None and measurement is not None:
             kf = ConstantVelocityKF(
@@ -343,155 +386,159 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
         status = track.step(measurement)
         if status == TrackStatus.LOST:
             track = None
-            moving = False
             qdot_cmd = np.zeros(7)
             continue
 
         q_current = env.get_joint_positions()
         ee_pos = panda_tcp_numpy(q_current)
+        obj_est = track.kf.x[:3].copy()
+        obj_vel = track.kf.x[3:].copy()
+        # The cube slides on a plane; a nonzero z velocity estimate is noise
+        # and must not be extrapolated (it shifted an earlier rendezvous
+        # point 1.9cm too high).
+        vel_horizontal = obj_vel.copy()
+        vel_horizontal[2] = 0.0
+        speed = float(np.linalg.norm(vel_horizontal))
 
-        # Hold position until the track is CONFIRMED and the tracked
-        # object has drifted (via the conveyor's own motion) close to
-        # the arm's reachable footprint -- see module docstring, point 3.
-        xy_dist_to_home = float(np.linalg.norm(track.kf.x[:2] - home_ee_xy))
-        if not moving:
-            if status == TrackStatus.CONFIRMED and xy_dist_to_home < _CLOSE_RANGE_M:
-                moving = True
-            else:
-                qdot_cmd = np.zeros(7)
-                continue
-
-        # Blend the lookahead intercept point smoothly into the live
-        # estimate as the arm closes in, instead of hard-switching at
-        # _CLOSE_RANGE_M. The hard switch used to make `target` jump
-        # discontinuously (the lookahead point leads the object by design;
-        # the live estimate doesn't) right at the switch boundary -- the
-        # arm, still catching up toward the pre-switch target, would
-        # overshoot past the object exactly where the switch fired. `blend`
-        # is 1.0 (pure lookahead) far away, 0.0 (pure live estimate) at
-        # zero distance, and linear in between, so `target` now moves
-        # continuously with no jump. See design spec Section 12.
-        live_dist = float(np.linalg.norm(ee_pos - track.kf.x[:3]))
-        live_estimate = track.kf.x[:3].copy()
-        if status == TrackStatus.CONFIRMED:
-            intercept = solve_intercept(
-                obj_pos0=track.kf.x[:3],
-                obj_vel=track.kf.x[3:],
-                ee_pos=ee_pos,
-                ee_max_speed=EE_MAX_SPEED,
-            )
-            lookahead_point = intercept[0] if intercept is not None else live_estimate
-        else:
-            lookahead_point = live_estimate
-        blend = float(np.clip(live_dist / _CLOSE_RANGE_M, 0.0, 1.0))
-        target = blend * lookahead_point + (1.0 - blend) * live_estimate
-        # No Z clearance added here (see module docstring, point 5): now
-        # that `ee_pos`/`target` are both TCP (fingertip) positions rather
-        # than the flange, targeting the object's own center height is
-        # correct -- the fingertips should be AT that height to straddle
-        # and close around the object, not offset above it.
-
-        qdot_cmd = mpc.solve(q_current, target)
-
-        if grasp_executor.should_close(ee_pos, target, status, covariance=track.kf.P):
-            env.set_gripper(closed=True)
-            # Found via a user-reported visual grasp failure: without this,
-            # the object's conveyor velocity actuator keeps commanding
-            # motion forever, fighting the grip indefinitely (confirmed by
-            # direct instrumentation). A real conveyor exerts no more
-            # belt-driven force once an object is lifted off it.
-            env.stop_conveyor_object()
-            # Baseline for the lift-verification height metrics below, taken
-            # at the grasp-commit instant -- i.e. right now, before the
-            # settle loop just below runs. Capturing this AFTER that settle
-            # loop (as an earlier version of this code did) silently
-            # contaminates the baseline: the settle loop lets the object sag
-            # under the closing gripper before the lift even starts, so part
-            # of the real lift ends up hidden inside the "baseline" instead
-            # of counted as gain. See module docstring, point 10.
-            object_pos_before_lift = env.get_object_ground_truth().copy()
-            true_obj_pos = env.get_object_ground_truth()
-            grasp_error = float(np.linalg.norm(ee_pos - true_obj_pos))
-            # Hold the closing command for a few more sim steps so the
-            # gripper's commanded closing motion actually plays out in the
-            # physics (see _POST_GRASP_SETTLE_STEPS) -- purely cosmetic for
-            # a recorded demo; grasp_error was already computed above, at
-            # the commit instant, and is unaffected by these extra steps.
-            peak_obj_z = object_pos_before_lift[2]
-            for _ in range(_POST_GRASP_SETTLE_STEPS):
-                settle_start = time.perf_counter()
-                env.step(np.zeros(7))
-                peak_obj_z = max(peak_obj_z, float(env.get_object_ground_truth()[2]))
-                if viewer is not None:
-                    viewer.sync()
-                    remaining = env.dt - (time.perf_counter() - settle_start)
-                    if remaining > 0:
-                        time.sleep(remaining)
-
-            # Lift phase (see module docstring, point 10): a closed gripper
-            # merely resting on an unlifted object can pass a contact check
-            # at the commit instant even though it has no real hold. Actually
-            # commanding the TCP _LIFT_HEIGHT_M upward and re-checking contact
-            # afterward -- mirroring the reference repo's "Verify Lift" state
-            # -- is the only way to distinguish a genuine grip from one that
-            # merely happened to be touching.
-            #
-            # The target is ramped linearly across the ticks (alpha grows
-            # from 1/_LIFT_CONTROL_TICKS to 1.0) rather than fixed at the
-            # full +10cm offset for every tick. A fixed target let the MPC's
-            # terminal_weight drive near-max joint velocity and close ~90% of
-            # the gap in the first ~0.37s, front-loading an unnecessary
-            # inertial load on the grip during the fastest phase of the
-            # motion (measured ~24% grip-force surcharge) instead of the
-            # paced ~2s lift the tick count was sized for.
-            for i in range(_LIFT_CONTROL_TICKS):
-                alpha = (i + 1) / _LIFT_CONTROL_TICKS
-                lift_target = ee_pos + alpha * np.array([0.0, 0.0, _LIFT_HEIGHT_M])
-                q_current = env.get_joint_positions()
-                qdot_cmd = mpc.solve(q_current, lift_target)
-                for _ in range(sim_steps_per_control):
-                    lift_start = time.perf_counter()
-                    env.step(qdot_cmd)
-                    peak_obj_z = max(
-                        peak_obj_z, float(env.get_object_ground_truth()[2])
-                    )
-                    if viewer is not None:
-                        viewer.sync()
-                        remaining = env.dt - (time.perf_counter() - lift_start)
-                        if remaining > 0:
-                            time.sleep(remaining)
+        if phase == "TRACK":
+            if status == TrackStatus.CONFIRMED and speed > 1e-3:
+                rendezvous = obj_est + (vel_horizontal / speed) * (
+                    speed * _RENDEZVOUS_TIME_BUDGET_S
+                )
+                rendezvous[2] = _GRASP_Z
+                phase, goto_ticks = "GOTO", 0
             qdot_cmd = np.zeros(7)
-            for _ in range(_POST_LIFT_SETTLE_STEPS):
-                lift_settle_start = time.perf_counter()
+            continue
+
+        if phase == "GOTO":
+            qdot_cmd = mpc.solve(q_current, rendezvous)
+            goto_ticks += 1
+            dist = float(np.linalg.norm(ee_pos - rendezvous))
+            stalled = (
+                float(np.linalg.norm(qdot_cmd)) < _GOTO_STALL_QDOT
+                and dist < _GOTO_STALL_DIST_M
+            )
+            if (
+                dist < _SETTLE_TOL_M
+                or stalled
+                or goto_ticks * tick_dt > _GOTO_TIMEOUT_S
+            ):
+                phase = "WAIT"
+                qdot_cmd = np.zeros(7)
+            continue
+
+        # phase == "WAIT": arm stationary, gripper open, straddling the path.
+        qdot_cmd = np.zeros(7)
+        if last_meas is None:
+            continue
+        _, tcp_rot = panda_tcp_pose_numpy(q_current)
+        closing_axis = tcp_rot[:, 1]
+        elapsed = step * config["dt"] - last_meas_t
+        predicted = last_meas + obj_vel * (elapsed + _CLOSE_LEAD_S)
+        offset = float(np.dot(predicted - ee_pos, closing_axis))
+        crossed = prev_offset is not None and (
+            offset == 0.0 or (prev_offset < 0.0) != (offset < 0.0)
+        )
+        prev_offset = offset
+        if not crossed:
+            continue
+
+        env.set_gripper(closed=True)
+        # Found via a user-reported visual grasp failure: without this,
+        # the object's conveyor velocity actuator keeps commanding
+        # motion forever, fighting the grip indefinitely (confirmed by
+        # direct instrumentation). A real conveyor exerts no more
+        # belt-driven force once an object is lifted off it.
+        env.stop_conveyor_object()
+        # Baseline for the lift-verification height metrics below, taken
+        # at the grasp-commit instant -- i.e. right now, before the
+        # settle loop just below runs. Capturing this AFTER that settle
+        # loop (as an earlier version of this code did) silently
+        # contaminates the baseline: the settle loop lets the object sag
+        # under the closing gripper before the lift even starts, so part
+        # of the real lift ends up hidden inside the "baseline" instead
+        # of counted as gain. See module docstring, point 10.
+        object_pos_before_lift = env.get_object_ground_truth().copy()
+        true_obj_pos = env.get_object_ground_truth()
+        grasp_error = float(np.linalg.norm(ee_pos - true_obj_pos))
+        # Hold the closing command for a few more sim steps so the
+        # gripper's commanded closing motion actually plays out in the
+        # physics (see _POST_GRASP_SETTLE_STEPS) -- purely cosmetic for
+        # a recorded demo; grasp_error was already computed above, at
+        # the commit instant, and is unaffected by these extra steps.
+        peak_obj_z = object_pos_before_lift[2]
+        for _ in range(_POST_GRASP_SETTLE_STEPS):
+            settle_start = time.perf_counter()
+            env.step(np.zeros(7))
+            peak_obj_z = max(peak_obj_z, float(env.get_object_ground_truth()[2]))
+            if viewer is not None:
+                viewer.sync()
+                remaining = env.dt - (time.perf_counter() - settle_start)
+                if remaining > 0:
+                    time.sleep(remaining)
+
+        # Lift phase (see module docstring, point 10): a closed gripper
+        # merely resting on an unlifted object can pass a contact check
+        # at the commit instant even though it has no real hold. Actually
+        # commanding the TCP _LIFT_HEIGHT_M upward and re-checking contact
+        # afterward -- mirroring the reference repo's "Verify Lift" state
+        # -- is the only way to distinguish a genuine grip from one that
+        # merely happened to be touching.
+        #
+        # The target is ramped linearly across the ticks (alpha grows
+        # from 1/_LIFT_CONTROL_TICKS to 1.0) rather than fixed at the
+        # full +10cm offset for every tick. A fixed target let the MPC's
+        # terminal_weight drive near-max joint velocity and close ~90% of
+        # the gap in the first ~0.37s, front-loading an unnecessary
+        # inertial load on the grip during the fastest phase of the
+        # motion (measured ~24% grip-force surcharge) instead of the
+        # paced ~2s lift the tick count was sized for.
+        for i in range(_LIFT_CONTROL_TICKS):
+            alpha = (i + 1) / _LIFT_CONTROL_TICKS
+            lift_target = ee_pos + alpha * np.array([0.0, 0.0, _LIFT_HEIGHT_M])
+            q_current = env.get_joint_positions()
+            qdot_cmd = mpc.solve(q_current, lift_target)
+            for _ in range(sim_steps_per_control):
+                lift_start = time.perf_counter()
                 env.step(qdot_cmd)
                 peak_obj_z = max(peak_obj_z, float(env.get_object_ground_truth()[2]))
                 if viewer is not None:
                     viewer.sync()
-                    remaining = env.dt - (time.perf_counter() - lift_settle_start)
+                    remaining = env.dt - (time.perf_counter() - lift_start)
                     if remaining > 0:
                         time.sleep(remaining)
+        qdot_cmd = np.zeros(7)
+        for _ in range(_POST_LIFT_SETTLE_STEPS):
+            lift_settle_start = time.perf_counter()
+            env.step(qdot_cmd)
+            peak_obj_z = max(peak_obj_z, float(env.get_object_ground_truth()[2]))
+            if viewer is not None:
+                viewer.sync()
+                remaining = env.dt - (time.perf_counter() - lift_settle_start)
+                if remaining > 0:
+                    time.sleep(remaining)
 
-            # Real, direct verification (env.is_grasped(): both fingers
-            # simultaneously in contact with the object, MuJoCo contact
-            # array, not inferred from distance) -- see design spec Section
-            # 12 for why `grasped`/`grasp_error_m` alone were never enough
-            # to confirm an actual pick. Now evaluated after the lift +
-            # settle above (module docstring, point 10), not immediately
-            # after the gripper closes.
-            contact_verified = env.is_grasped()
-            object_height_gain_m = float(
-                env.get_object_ground_truth()[2] - object_pos_before_lift[2]
-            )
-            object_peak_height_gain_m = float(peak_obj_z - object_pos_before_lift[2])
-            result = {
-                "grasped": True,
-                "grasp_error_m": grasp_error,
-                "steps": step,
-                "contact_verified": contact_verified,
-                "object_height_gain_m": object_height_gain_m,
-                "object_peak_height_gain_m": object_peak_height_gain_m,
-            }
-            break
+        # Real, direct verification (env.is_grasped(): both fingers
+        # simultaneously in contact with the object, MuJoCo contact
+        # array, not inferred from distance) -- see design spec Section
+        # 12 for why `grasped`/`grasp_error_m` alone were never enough
+        # to confirm an actual pick. Now evaluated after the lift +
+        # settle above (module docstring, point 10), not immediately
+        # after the gripper closes.
+        contact_verified = env.is_grasped()
+        object_height_gain_m = float(
+            env.get_object_ground_truth()[2] - object_pos_before_lift[2]
+        )
+        object_peak_height_gain_m = float(peak_obj_z - object_pos_before_lift[2])
+        result = {
+            "grasped": True,
+            "grasp_error_m": grasp_error,
+            "steps": step,
+            "contact_verified": contact_verified,
+            "object_height_gain_m": object_height_gain_m,
+            "object_peak_height_gain_m": object_peak_height_gain_m,
+        }
+        break
 
     if result is None:
         result = {
