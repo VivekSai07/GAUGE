@@ -19,6 +19,32 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.16.1",
 ]
+yolo-precision = [
+    "ultralytics>=8.3.0",
+    # torch/torchvision are already transitive deps of ultralytics, but
+    # [tool.uv.sources] below only overrides the source of *direct*
+    # dependencies -- listing them explicitly here is required for the
+    # CUDA-index override to actually take effect (verified: without these
+    # two lines, `uv lock -v` shows torch/torchvision resolved straight off
+    # pypi.org regardless of the sources table, since ultralytics pulls
+    # them in transitively).
+    "torch",
+    "torchvision",
+]
+
+[tool.uv.sources]
+# PyPI's default torch/torchvision wheels are CPU-only; pull CUDA-enabled
+# builds from PyTorch's own index instead so the yolo-precision group's GPU
+# training actually uses the GPU (cu130 matches this machine's driver-
+# reported CUDA 13.2 and has win_amd64 wheels for the resolved torch/
+# torchvision versions).
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

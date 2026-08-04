@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 logs/
 .coverage
+experiments/yolo_precision/data/
+# Ultralytics downloads pretrained checkpoints and writes training-run
+# artifacts to the current working directory by default, which can land
+# outside experiments/yolo_precision/data/ depending on how a script is invoked.
+*.pt
+runs/
