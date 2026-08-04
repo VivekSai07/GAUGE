@@ -37,12 +37,14 @@ acados.
 
 ## Demonstrated result
 
-The Franka reaches, targets, and closes on the cube with fingertip-to-object
-accuracy at the commit instant of **~3.8cm**, and mechanically registers
-contact (`grasped: True`). But `contact_verified` — checked *after* a real
-~10cm lift, not at the instant the gripper closes — currently reads
-**`False`**: the grasp does not yet survive being lifted. This is an honest,
-verified, currently-open limitation, not an oversight — see below.
+The Franka reaches, targets, closes on the cube, and lifts it ~10cm — and
+the grasp survives the lift. A fresh full run reports `{'grasped': True,
+'grasp_error_m': 0.0135, 'contact_verified': True, 'object_height_gain_m':
+0.0893, 'object_peak_height_gain_m': 0.0897}`, with the full test suite at
+57/57. `contact_verified` is checked *after* the lift, not at the instant
+the gripper closes, so this is a real hold, not momentary contact — the
+first one this project has produced. This is a recent result (Round 6,
+below) and comes with a real, stated limitation of its own — see below.
 
 Getting here took four rounds of real fixes, not tuning. Rounds 1-3: the
 conveyor object had to become a genuinely physically-simulated body (not a
@@ -82,6 +84,37 @@ pins the exact failure threshold, why an earlier, honestly-measured
 object the moment it was picked up, and what Round 5's result narrows the
 remaining investigation to.
 
+Round 6 is what actually closed the gap, and it wasn't perception. An error
+budget at the grasp-commit instant, along the gripper's closing axis, found
+the arm itself responsible for 82% of the total error — perception had
+already stopped being the bottleneck. The root cause was strategy, not
+precision: the arm was chasing the object's live position estimate and
+committing on proximity (pursuit), and pursuit never converges here — best
+transient approach 3.15cm, then falling behind to a 5-8cm steady state — so
+the grasp committed mid-motion and the arm coasted a further ~2cm into the
+object while closing. The fix replaces pursuit with rendezvous: the arm
+drives to a point ahead of the object on its predicted path, comes to a full
+stop there, and waits for the object to arrive before closing. Three
+perception-geometry fixes rode along with it (border-clipped detections
+rejected as misses instead of trusted, the centroid taken from the cube's
+top face instead of its whole silhouette, a world-Z height offset corrected).
+Together these moved `grasp_error_m` from 0.0377 to **0.0135** and
+`object_peak_height_gain_m` from 0.0327 to **0.0897**, and flipped
+`contact_verified` to **`True`** — the first real, lift-surviving grasp this
+project has produced. Full evidence, including the error-budget
+decomposition and the phase-by-phase design, is in
+[the rendezvous design spec](docs/superpowers/specs/2026-08-04-rendezvous-grasp-design.md).
+
+This comes with a real limitation, stated plainly rather than buried: the
+wrist camera sees nothing during the final wait (0% detection rate once
+border-clipped detections are correctly rejected), so the close trigger runs
+on pure dead-reckoning from the last good measurement, not live perception.
+That works at 4 of the 6 conveyor speeds tested (0.06/0.08/0.10/0.12 m/s
+pass; 0.04/0.05 m/s fail) — a sensing-coverage gap, not a tuning one. The
+project's configured speed (0.08 m/s commanded) is one of the passing ones;
+note that these are *commanded* belt speeds, and the object's actual
+measured speed at the 0.08 setting is closer to **0.062 m/s**.
+
 ## Running it
 
 ```bash
@@ -113,5 +146,6 @@ configs/        Run parameters
 ## Documentation
 
 - [Design spec](docs/superpowers/specs/2026-07-29-dynamic-object-tracking-manipulation-design.md) — architecture, novelty positioning, and the demonstrated-accuracy writeup
+- [Rendezvous grasp design spec](docs/superpowers/specs/2026-08-04-rendezvous-grasp-design.md) — the Round 6 error-budget decomposition and the pursuit-to-rendezvous fix that produced the first lift-surviving grasp
 - [Implementation plan](docs/superpowers/plans/2026-07-29-conveyor-mvp.md) — the task-by-task build plan
 - [Project metrics](docs/PROJECT_METRICS.md) — every accuracy number and engineering metric this project has produced, sourced back to the issue or milestone it came from ([visual version](https://claude.ai/code/artifact/9182e99d-2984-4d2e-b4e4-ec4156ed6ff2))

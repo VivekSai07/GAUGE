@@ -29,6 +29,7 @@ A number from one is never presented as evidence for the other below.
 | 2 | [Accuracy Improvements](https://github.com/VivekSai07/GAUGE/milestone/2) | Conveyor object switched from a scripted `mocap` ghost to a real physics body ([#6](https://github.com/VivekSai07/GAUGE/issues/6)); smoothed MPC approach target; TCP-consistent (not flange-consistent) grasp targeting | 7.1cm → 4.4cm |
 | 3 | [Round 3: Physical Grasp Debugging](https://github.com/VivekSai07/GAUGE/milestone/4) | Orientation-aware MPC cost term (penalizes offset along the gripper's non-correctable local X axis) ([#10](https://github.com/VivekSai07/GAUGE/issues/10)); real contact check via MuJoCo's own contact array (both fingers simultaneously, not inferred from distance) | 4.4cm → 3.9cm, `contact_verified: True`* |
 | 5 | YOLO Perception Integration | Color-threshold `segment_object_centroid` swapped for the validated YOLO-detected-box + color-gated-depth `yolo_centroid` at the real pipeline's single perception call site — see [design spec, Round 5](superpowers/specs/2026-07-29-dynamic-object-tracking-manipulation-design.md#round-5-better-perception-alone-did-not-close-the-gap) | 3.9cm → 3.77cm, `contact_verified: False` (unchanged) |
+| 6 | Rendezvous Grasp | Pursuit (chase the live estimate, commit on proximity) replaced with rendezvous (park ahead of the object on its path, settle, close as it arrives), after an error-budget decomposition found the arm — not perception — responsible for 82% of the closing-axis error; plus three perception-geometry fixes (border-clipped detections rejected as misses, top-face centroid, world-Z height offset) — see [design spec](superpowers/specs/2026-08-04-rendezvous-grasp-design.md) | 3.77cm → **1.35cm**, `contact_verified: True` — first lift-surviving grasp |
 
 \* Round 3's `contact_verified: True` was checked immediately after the
 gripper closed — proving momentary contact, not a real hold. Round 4
@@ -135,11 +136,61 @@ in frame, this specific failure mode should be rare in the geometry that
 actually matters at commit time — worth confirming with real episode
 telemetry before scoping a pipeline-integration spec around this result.
 
+## Round 6: pursuit to rendezvous — the grasp that finally holds
+
+Full writeup: [design spec](superpowers/specs/2026-08-04-rendezvous-grasp-design.md).
+
+Round 5 improved perception but left `contact_verified: False`. An error
+budget at the grasp-commit instant, along the gripper's closing axis, found
+that perception had stopped being the bottleneck: the arm itself accounted
+for 82% of the total error (-0.0270m of -0.0330m). The root cause was
+strategy, not precision — the arm was chasing the object's live position
+estimate and committing on proximity (pursuit), and pursuit measurably never
+converges here: best transient approach 3.15cm, then falling behind to a
+5-8cm steady state. The commit fired mid-motion (`|qdot| = 0.43 rad/s`) and
+the arm coasted a further ~2cm into the object during the finger-close
+window.
+
+**Fix:** pursuit replaced with rendezvous. The arm now runs four phases —
+TRACK (hold still until the track is confirmed with a usable velocity
+estimate), GOTO (drive to a rendezvous point placed ahead of the object on
+its predicted path, at the known cube-center height), WAIT (arm fully
+stopped, gripper open, dead-reckoning the object from the last verified
+measurement), and a close trigger (fires when the dead-reckoned object
+position crosses the TCP along the gripper's closing axis). Three
+perception-geometry fixes rode along with it: border-clipped detections are
+now rejected as misses instead of trusted, the centroid is taken from the
+cube's top face instead of its whole silhouette, and a world-Z height offset
+was corrected.
+
+**Result**, measured with the project's configured 0.08 m/s conveyor speed:
+
+| Metric | Round 5 | Round 6 |
+|---|---|---|
+| `grasp_error_m` | 0.0377 | **0.0135** |
+| `finger_gap` | 0.0075 (closed past the cube) | 0.042 (genuine capture) |
+| `object_peak_height_gain_m` | 0.033 | **0.090** |
+| `contact_verified` | False | **True** |
+
+A fresh full run reports `{'grasped': True, 'grasp_error_m': 0.0135,
+'contact_verified': True, 'object_height_gain_m': 0.0893,
+'object_peak_height_gain_m': 0.0897}` — the first grasp this project has
+produced that survives a real lift.
+
+**Known limitation, stated in the same breath, not buried:** the wrist
+camera sees nothing during the final WAIT (0% detection rate once
+border-clipped detections are correctly rejected), so the close trigger
+runs on pure dead-reckoning, not live perception. This currently passes at
+4 of 6 tested conveyor speeds (0.06/0.08/0.10/0.12 m/s pass; 0.04/0.05 m/s
+fail) — a sensing-coverage gap, not a tuning one. The project's configured
+speed (0.08 m/s) is one of the passing ones; note these are *commanded*
+belt speeds — the object's actual measured speed at the 0.08 setting is
+closer to ~0.062 m/s.
+
 ## Engineering metrics
 
-- **Tests:** 53 total (52 passing, 1 failing by design — the honest,
-  documented, still-open Round 4 grasp-lift limitation, not a hidden
-  regression).
+- **Tests:** 57 total, 57 passing. The Round 4 grasp-lift limitation that
+  previously kept one test failing by design is resolved as of Round 6.
 - **GitHub issues:** 22 closed with a verified fix, 3 open on purpose
   ([#13](https://github.com/VivekSai07/GAUGE/issues/13) — grasp doesn't
   yet survive a lift; [#27](https://github.com/VivekSai07/GAUGE/issues/27)
@@ -158,15 +209,21 @@ telemetry before scoping a pipeline-integration spec around this result.
 **Proven:** the tracking system — constant-velocity Kalman filter,
 Mahalanobis gating, m/n track confirmation, closed-form interception,
 kinematic MPC — runs reliably in real time. Grasp verification is honest:
-a mechanical contact check is no longer treated as proof of a hold.
+a mechanical contact check is no longer treated as proof of a hold. As of
+Round 6, the grasp survives a real ~10cm lift: `grasp_error_m` 0.0135,
+`contact_verified: True`, `object_peak_height_gain_m` 0.0897 — the
+targeting-precision cliff that Round 4 root-caused and Round 5's better
+perception alone couldn't clear was closed by fixing the arm's strategy
+(pursuit → rendezvous), which an error budget showed was responsible for
+82% of the closing-axis error, not perception.
 
-**Open:** the grasp does not yet survive a real lift in the full closed
-loop, root-caused to a ~3cm targeting-precision cliff rather than a
-control-strategy bug. The validated YOLO detector has now been wired into
-the real pipeline (Round 5): `grasp_error_m` moved 0.0394 → 0.0377 and
-`object_peak_height_gain_m` moved 0.0300 → 0.0327 — real but small gains.
-`contact_verified` is still `False`. Better perception alone does not
-close the gap; the concrete next hypothesis is the KF/prediction-smoothing
-layer — re-tune or bypass the KF blend for the final-approach
-re-measurement now that the raw measurement itself is meaningfully
-better.
+**Open:** the rendezvous approach depends on dead-reckoning through a final
+approach window where the wrist camera sees nothing (0% detection rate) —
+it works because that window is short enough for the Kalman filter's
+constant-velocity assumption to hold, not because the object stays
+visible. It currently passes at 4 of 6 tested conveyor speeds
+(0.06/0.08/0.10/0.12 m/s pass; 0.04/0.05 m/s fail — the project's
+configured 0.08 m/s speed is one of the passing ones), which is a
+sensing-coverage gap rather than a tuning one. Extending coverage to the
+slower speeds, or reducing how much of the approach is blind, is the
+concrete next step.
