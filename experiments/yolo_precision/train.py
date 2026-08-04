@@ -1,6 +1,6 @@
 """Fine-tune a small pretrained YOLO model on the synthetic cube dataset.
 
-Run: uv run --group yolo-precision python -m experiments.yolo_precision.train
+Run: uv run python -m experiments.yolo_precision.train
 Requires experiments/yolo_precision/generate_dataset.py to have been run
 first (produces data/dataset/data.yaml).
 

@@ -21,10 +21,10 @@ integration debugging (see task-12-report.md for the full narrative):
    face, `sim.conveyor_scene.OBJECT_HALF_HEIGHT_M` above its volumetric
    center, not on the center itself, since the object's geometry (like the
    rest of this MVP) is known by design. This is now corrected by passing
-   `depth_bias=OBJECT_HALF_HEIGHT_M` to `segment_object_centroid` below,
-   which cut the measured mean residual from ~0.0205m (dominated by the
-   +0.0196m Z bias) to ~0.0095m (Z bias ~0, leaving only genuine, unbiased
-   x/y noise).
+   `depth_bias=OBJECT_HALF_HEIGHT_M` to `yolo_centroid` (see point 11
+   below for the perception swap), which cut the measured mean residual
+   from ~0.0205m (dominated by the +0.0196m Z bias) to ~0.0095m (Z bias
+   ~0, leaving only genuine, unbiased x/y noise).
 
 2. Real per-joint limits, not a uniform +-2.8 rad. `configs/conveyor.yaml`'s
    original `mpc.q_min`/`q_max` scalars do not match this Menagerie Panda's
@@ -170,6 +170,7 @@ import time
 import mujoco.viewer
 import numpy as np
 import yaml
+from ultralytics import YOLO
 
 from control.mpc import KinematicMPC
 from control.panda_kinematics import (
@@ -180,7 +181,6 @@ from control.panda_kinematics import (
 from manipulation.grasp import GraspExecutor
 from perception.camera import CameraIntrinsics
 from perception.yolo_segment import MODEL_PATH, yolo_centroid
-from ultralytics import YOLO
 from planning.intercept import solve_intercept
 from sim.conveyor_scene import OBJECT_HALF_HEIGHT_M, ConveyorSceneEnv
 from tracking.kf import ConstantVelocityKF

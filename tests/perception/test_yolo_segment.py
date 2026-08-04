@@ -67,6 +67,45 @@ def test_yolo_centroid_returns_none_when_no_cube_in_view():
     intrinsics = CameraIntrinsics(fx=64.0, fy=64.0, cx=32.0, cy=32.0)
 
     result = yolo_centroid(
-        rgb, depth, model, intrinsics, color_lower=(150, 0, 0), color_upper=(255, 80, 80)
+        rgb,
+        depth,
+        model,
+        intrinsics,
+        color_lower=(150, 0, 0),
+        color_upper=(255, 80, 80),
+    )
+    assert result is None
+
+
+def test_yolo_centroid_returns_none_when_box_found_but_color_mask_empty():
+    """A box exists but zero pixels inside it match the color threshold --
+    this is the case that took the earlier validation experiment
+    (experiments/yolo_precision/evaluate.py's _yolo_bbox_center_to_3d) from
+    NO-GO to GO (see perception/yolo_segment.py's module docstring). It's
+    distinct from the zero-boxes case already covered above, and must not
+    be simplified into a full-box-mean fallback."""
+    from ultralytics import YOLO
+
+    env = ConveyorSceneEnv(conveyor_velocity=np.array([0.0, 0.08, 0.0]))
+    env.reset()
+    _place_cube_in_view(env, x=0.5, y=-0.1, z=0.05)
+
+    model = YOLO(str(MODEL_PATH))
+    rgb, depth = env.get_rgbd(64, 64)
+    fx, fy, cx, cy = env.camera_intrinsics(64, 64)
+    intrinsics = CameraIntrinsics(fx, fy, cx, cy)
+
+    # Prove the detector actually found something, so the None checked
+    # below can only have come from the color-mask branch, not this one.
+    results = model.predict(source=rgb, verbose=False)[0]
+    assert len(results.boxes) >= 1
+
+    result = yolo_centroid(
+        rgb,
+        depth,
+        model,
+        intrinsics,
+        color_lower=(0, 200, 0),
+        color_upper=(0, 255, 0),
     )
     assert result is None

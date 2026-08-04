@@ -12,7 +12,7 @@ this file's own directory, not the repo root, at sys.path[0], so `sim`
 wouldn't be importable; verified via `ModuleNotFoundError: No module named
 'sim'` under the literal `python experiments/yolo_precision/
 generate_dataset.py` form):
-    uv run --group yolo-precision python -m experiments.yolo_precision.generate_dataset
+    uv run python -m experiments.yolo_precision.generate_dataset
 """
 
 import argparse
