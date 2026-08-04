@@ -155,6 +155,14 @@ integration debugging (see task-12-report.md for the full narrative):
     during the lift+settle window -- direct proof a genuine lift happened
     at all, even one that didn't hold; a final-only reading cannot tell
     "never lifted" apart from "lifted then slipped back down."
+11. Perception swapped from perception.segment.segment_object_centroid
+    (pure RGB color-threshold) to perception.yolo_segment.yolo_centroid
+    (a YOLO-detected bounding box center, still using the same color
+    threshold to gate which pixels inside that box count for depth) --
+    see docs/superpowers/specs/2026-08-04-yolo-perception-integration-design.md.
+    Validated in isolation to cut mean 3D localization error 43.8%
+    (docs/superpowers/specs/2026-08-02-yolo-detector-precision-validation-design.md,
+    Section 7) before being wired in here.
 """
 
 import time
@@ -171,7 +179,8 @@ from control.panda_kinematics import (
 )
 from manipulation.grasp import GraspExecutor
 from perception.camera import CameraIntrinsics
-from perception.segment import segment_object_centroid
+from perception.yolo_segment import MODEL_PATH, yolo_centroid
+from ultralytics import YOLO
 from planning.intercept import solve_intercept
 from sim.conveyor_scene import OBJECT_HALF_HEIGHT_M, ConveyorSceneEnv
 from tracking.kf import ConstantVelocityKF
@@ -238,6 +247,7 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
     fx, fy, cx, cy = env.camera_intrinsics(cam_cfg["width"], cam_cfg["height"])
     intrinsics = CameraIntrinsics(fx, fy, cx, cy)
     cam_id = env.model.camera("wrist_cam").id
+    detector = YOLO(str(MODEL_PATH))
 
     kf_cfg, track_cfg = config["kf"], config["track"]
     track: Track | None = None
@@ -298,9 +308,10 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
             continue
 
         rgb, depth = env.get_rgbd(cam_cfg["width"], cam_cfg["height"])
-        measurement_cam = segment_object_centroid(
+        measurement_cam = yolo_centroid(
             rgb,
             depth,
+            detector,
             intrinsics,
             tuple(cam_cfg["color_lower"]),
             tuple(cam_cfg["color_upper"]),

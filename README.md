@@ -34,7 +34,7 @@ plain Python modules wired together in `run_conveyor_demo.py`.
 ## Demonstrated result
 
 The Franka reaches, targets, and closes on the cube with fingertip-to-object
-accuracy at the commit instant of **~3.9cm**, and mechanically registers
+accuracy at the commit instant of **~3.8cm**, and mechanically registers
 contact (`grasped: True`). But `contact_verified` — checked *after* a real
 ~10cm lift, not at the instant the gripper closes — currently reads
 **`False`**: the grasp does not yet survive being lifted. This is an honest,
@@ -51,14 +51,26 @@ real lift (the momentary check turned out to be too weak a bar, informed by
 a second working reference implementation's explicit "Verify Lift" step)
 and root-caused, with `systematic-debugging`, exactly why the grasp doesn't
 survive one: a sharp, mechanically-grounded tolerance cliff (~3cm along the
-gripper's closing axis) that this project's current 64×64 RGB-D
-color-segmentation accuracy sits right on top of. See
+gripper's closing axis) that this project's then-current 64×64 RGB-D
+color-segmentation accuracy sits right on top of.
+
+Round 5 swapped that color-threshold perception for a YOLO-detected bounding
+box (still color-gated for depth), independently validated to cut mean 3D
+localization error 43.8% in isolation. Wired into the real closed-loop
+pipeline, it moved `grasp_error_m` from ~0.039 to **0.0377** and
+`object_peak_height_gain_m` from ~0.03 to **0.0327** — a real but small
+gain, and **not enough to flip `contact_verified` to `True`**: a fresh full
+run still reports `contact_verified: False`
+(`{'grasped': True, 'grasp_error_m': 0.0377, 'contact_verified': False,
+'object_height_gain_m': 0.0264, 'object_peak_height_gain_m': 0.0327}`).
+Better perception alone does not close the gap; see
 [the design spec's Section 12](docs/superpowers/specs/2026-07-29-dynamic-object-tracking-manipulation-design.md#12-demonstrated-accuracy--known-limitation)
-("Round 4" in particular) for the full root-cause story — eight-plus
-hypotheses tested against real runs, an isolation experiment that pins the
-exact failure threshold, and why an earlier, honestly-measured
+("Round 4" and "Round 5" in particular) for the full root-cause story —
+eight-plus hypotheses tested against real runs, an isolation experiment that
+pins the exact failure threshold, why an earlier, honestly-measured
 `contact_verified: True` still described a system that would drop the
-object the moment it was picked up.
+object the moment it was picked up, and what Round 5's result narrows the
+remaining investigation to.
 
 ## Running it
 
