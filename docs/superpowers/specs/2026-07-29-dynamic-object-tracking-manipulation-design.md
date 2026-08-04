@@ -862,7 +862,7 @@ itself, or widening the physical margin — is the only remaining path, and
 that further control-strategy tuning at the current precision floor is not
 a productive direction.
 
-### Round 5: better perception alone did not close the gap
+## Round 5: better perception alone did not close the gap
 
 Round 4 concluded the remaining ~2-3cm cliff looked like a sensing-resolution
 limit, not a control-logic bug, and named improving segmentation accuracy
@@ -893,8 +893,9 @@ still `False` (54 passed, 1 failed). A real headless episode
 Against the Round 4 baseline (`grasp_error_m` ~0.039, `object_peak_height_gain_m`
 ~0.03), the isolated 43.8% accuracy win barely moves the closed-loop numbers:
 `grasp_error_m` 0.039 → 0.0377 (~3% better) and `object_peak_height_gain_m`
-0.03 → 0.0327 (also marginally better, still well short of the ~3.0cm
-tolerated offset found in Round 4's cliff sweep). **This is a genuine,
+0.03 → 0.0327 (also marginally better, still well short of the 0.05
+threshold `test_conveyor_episode_grasps_within_tolerance` actually requires
+for a verified lift). **This is a genuine,
 informative negative result, not a wiring bug** — the isolated validation
 experiment and this integration were reviewed independently and both hold
 up. It means the ~2-3cm cliff is not, in fact, primarily explained by the
