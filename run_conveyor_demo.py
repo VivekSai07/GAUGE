@@ -234,6 +234,16 @@ from tracking.track import Track, TrackStatus
 _PLATFORM_TOP_Z = 0.03  # sim/conveyor_scene.py's platform top
 _GRASP_Z = _PLATFORM_TOP_Z + OBJECT_HALF_HEIGHT_M  # cube centre height
 _RENDEZVOUS_TIME_BUDGET_S = 3.0  # object-travel time placed ahead of it
+# The WAIT phase's blind dead-reckoning window is bounded by this budget,
+# and it must stay comfortably under configs/conveyor.yaml's
+# track.max_consecutive_misses (in control ticks: budget * control_hz vs.
+# max_consecutive_misses) -- if the track goes LOST mid-WAIT, `track` is
+# set to None and `continue`s (see the LOST-handling branch below), the
+# close trigger is never re-evaluated, and the episode silently runs to
+# max_steps with grasped: False and no indication why. Measured headroom
+# at the current 3.0s budget / 20 Hz control_hz (=60 ticks) against
+# max_consecutive_misses: 100 is real but not huge -- raising this budget
+# much past ~5.0s (100 ticks) would eat it entirely.
 _SETTLE_TOL_M = 0.008
 _GOTO_TIMEOUT_S = 4.0
 _GOTO_STALL_QDOT = 0.05
@@ -376,6 +386,13 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
                 n=track_cfg["n"],
                 max_consecutive_misses=track_cfg["max_consecutive_misses"],
             )
+            # A rebuilt track starts with zero velocity and a discontinuous
+            # last_meas; a stale prev_offset from before the rebuild could
+            # sign-differ against the new one and fire the grasp on that
+            # discontinuity instead of on the object actually crossing the
+            # TCP. Reset it so the first WAIT tick after (re-)acquisition
+            # can only record, never fire -- same as on first WAIT entry.
+            prev_offset = None
             qdot_cmd = np.zeros(7)
             continue
 
@@ -386,6 +403,7 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
         status = track.step(measurement)
         if status == TrackStatus.LOST:
             track = None
+            prev_offset = None
             qdot_cmd = np.zeros(7)
             continue
 
@@ -434,6 +452,16 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
         _, tcp_rot = panda_tcp_pose_numpy(q_current)
         closing_axis = tcp_rot[:, 1]
         elapsed = step * config["dt"] - last_meas_t
+        # Deliberately uses the full obj_vel (including its z component)
+        # here, NOT vel_horizontal -- even though the rendezvous-point
+        # computation above zeroes z on the grounds that a nonzero z
+        # estimate is noise. That rule is right for a lookahead extrapolated
+        # over _RENDEZVOUS_TIME_BUDGET_S (seconds), where noise dominates;
+        # it's wrong for this much shorter dead-reckoning window, where
+        # keeping z measurably wins: grasp_error_m 0.0135 with the full
+        # obj_vel vs. 0.0179 (32% worse) using vel_horizontal instead, both
+        # still contact_verified: True. Do not "fix" this to match the rule
+        # above without re-measuring.
         predicted = last_meas + obj_vel * (elapsed + _CLOSE_LEAD_S)
         offset = float(np.dot(predicted - ee_pos, closing_axis))
         crossed = prev_offset is not None and (

@@ -122,13 +122,24 @@ def test_yolo_centroid_rejects_border_clipped_detection():
     """A detection touching the image edge has a provably unreliable
     centroid: the object's true centre projects off-image and the measured
     centroid is clamped inward (design spec 2.2 -- measured max residual
-    11.2mm vs 2.5mm once rejected). Treat it as a miss."""
+    11.2mm vs 2.5mm once rejected). Treat it as a miss.
+
+    y = -0.15 is far enough into the frame that every other branch (box
+    found, color mask non-empty) still succeeds -- confirmed below by the
+    reject_border=False call returning a real result -- so the None from
+    reject_border=True below can only have come from the border-rejection
+    branch under test. (At the more extreme y=-0.20 used previously,
+    reject_border=False ALSO returns None because the detection is clipped
+    badly enough to fail earlier branches too, which made that version of
+    this test pass even with border rejection deleted entirely.)"""
     from ultralytics import YOLO
 
     env = ConveyorSceneEnv(conveyor_velocity=np.array([0.0, 0.08, 0.0]))
     env.reset()
-    # y = -0.20 puts the cube at the very edge of the wrist camera's view.
-    _place_cube_in_view(env, x=0.5, y=-0.20, z=0.05)
+    # y = -0.15 puts the cube near the edge of the wrist camera's view --
+    # clipped enough to trigger border rejection, not clipped so badly that
+    # other branches would already return None on their own.
+    _place_cube_in_view(env, x=0.5, y=-0.15, z=0.05)
     model = YOLO(str(MODEL_PATH))
     rgb, depth = env.get_rgbd(64, 64)
     fx, fy, cx, cy = env.camera_intrinsics(64, 64)
@@ -146,6 +157,15 @@ def test_yolo_centroid_rejects_border_clipped_detection():
         cam_pos,
         cam_mat,
     )
+
+    # Prove the detector genuinely finds and localizes the cube at this
+    # pose, so the None below can only have come from the border-rejection
+    # branch, not from the detection or color-mask branches failing first.
+    unrejected = yolo_centroid(
+        *args, depth_bias=OBJECT_HALF_HEIGHT_M, reject_border=False
+    )
+    assert unrejected is not None
+
     assert (
         yolo_centroid(*args, depth_bias=OBJECT_HALF_HEIGHT_M, reject_border=True)
         is None

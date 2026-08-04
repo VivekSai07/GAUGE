@@ -46,6 +46,14 @@ track:
   gate_threshold: 9.0
   m: 25
   n: 30
+  # Tied to run_conveyor_demo.py's _RENDEZVOUS_TIME_BUDGET_S: the WAIT
+  # phase's blind dead-reckoning window (budget_s * control_hz, in control
+  # ticks) must stay comfortably under this value, or the track goes LOST
+  # mid-WAIT -- track is set to None, the close trigger is never
+  # re-evaluated again, and the episode silently runs to max_steps with
+  # grasped: False and no indication why. Measured: ~60 consecutive misses
+  # at the current 3.0s budget against this 100 -- real headroom, but
+  # raising the budget much past ~5.0s (100 ticks) would eat it entirely.
   max_consecutive_misses: 100
 
 mpc:
