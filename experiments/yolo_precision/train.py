@@ -1,8 +1,16 @@
 """Fine-tune a small pretrained YOLO model on the synthetic cube dataset.
 
-Run: uv run --group yolo-precision python -m experiments.yolo_precision.train
+Run: uv run python -m experiments.yolo_precision.train
 Requires experiments/yolo_precision/generate_dataset.py to have been run
 first (produces data/dataset/data.yaml).
+
+Note: as of the YOLO perception integration, `ultralytics`/`torch` are
+main project dependencies (plain PyPI resolution, CPU-capable by
+default) rather than a GPU-pinned experiment-only group -- retraining
+with this script's `device=0` requires a CUDA-enabled torch build
+installed manually first, e.g.:
+    uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+(adjust the cu-version to match your own GPU driver).
 """
 
 import argparse

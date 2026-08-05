@@ -861,3 +861,61 @@ not yet fixed" paragraph above — improving segmentation/targeting precision
 itself, or widening the physical margin — is the only remaining path, and
 that further control-strategy tuning at the current precision floor is not
 a productive direction.
+
+## Round 5: better perception alone did not close the gap
+
+Round 4 concluded the remaining ~2-3cm cliff looked like a sensing-resolution
+limit, not a control-logic bug, and named improving segmentation accuracy
+itself as one of the two untried real fixes. `perception/yolo_segment.py`'s
+`yolo_centroid` (a YOLO-detected bounding-box center, still gated by the same
+color threshold to decide which pixels inside that box count for depth) was
+built and validated in isolation first
+(`docs/superpowers/specs/2026-08-02-yolo-detector-precision-validation-design.md`,
+Section 7): mean 3D localization error dropped 43.8% against the plain
+color-threshold baseline, a clean GO signal to wire it into the real
+pipeline.
+
+Wired in (swapping `perception.segment.segment_object_centroid` for
+`yolo_centroid` at the single call site in `run_one_episode`, no other
+change to tracking, prediction, planning, or control), the full suite still
+fails at the same assertion:
+`tests/test_integration_conveyor.py::test_conveyor_episode_grasps_within_tolerance`
+— `assert result["contact_verified"] is True` — with `contact_verified`
+still `False` (54 passed, 1 failed). A real headless episode
+(`uv run python run_conveyor_demo.py`) prints:
+
+```
+{'grasped': True, 'grasp_error_m': 0.037735851036565356, 'steps': 2025,
+ 'contact_verified': False, 'object_height_gain_m': 0.026396331563610435,
+ 'object_peak_height_gain_m': 0.03273432099497041}
+```
+
+Against the Round 4 baseline (`grasp_error_m` ~0.039, `object_peak_height_gain_m`
+~0.03), the isolated 43.8% accuracy win barely moves the closed-loop numbers:
+`grasp_error_m` 0.039 → 0.0377 (~3% better) and `object_peak_height_gain_m`
+0.03 → 0.0327 (also marginally better, still well short of the 0.05
+threshold `test_conveyor_episode_grasps_within_tolerance` actually requires
+for a verified lift). `object_height_gain_m` — the *final* lift height
+rather than the peak — moved the other way, 0.02798 → 0.02640 (~5.6%
+worse). That's not a contradiction: a slightly higher peak paired with a
+slightly lower final gain is consistent with the object being lifted a bit
+higher and then slipping, which is itself supporting evidence for the
+"the grasp doesn't hold" story Round 4 already established, not a new one.
+**This is a genuine,
+informative negative result, not a wiring bug** — the isolated validation
+experiment and this integration were reviewed independently and both hold
+up. It means the ~2-3cm cliff is not, in fact, primarily explained by the
+color-threshold segmentation noise floor Round 4 pointed to: a measurably
+better detector barely dented the closed-loop error.
+
+That narrows what's left to investigate. The perception measurement itself
+improved 43.8% in isolation but the closed-loop error barely moved, which
+points downstream of the raw measurement — most concretely, at the KF/
+prediction layer's own smoothing and the final approach's re-measurement
+window (Round 4, item 10): a Kalman filter tuned against the old, noisier
+measurement's characteristics could be over-smoothing the new, more precise
+one, reintroducing lag that erodes the perception gain before it ever
+reaches the grasp-commit decision. That is the concrete next hypothesis —
+re-tune or bypass the KF blend for the final-approach re-measurement now
+that the raw measurement itself is meaningfully better — not a vague "needs
+more work."

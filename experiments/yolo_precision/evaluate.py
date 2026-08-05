@@ -4,8 +4,8 @@ more precisely than the current RGB-threshold segmentation?
 Run (as a module, from the repo root -- a direct script-path invocation puts
 this file's own directory, not the repo root, at sys.path[0], so `perception`,
 `run_conveyor_demo`, and `sim` wouldn't be importable):
-    uv run --group yolo-precision python -m experiments.yolo_precision.evaluate
-Requires train.py to have produced data/cube_detector.pt.
+    uv run python -m experiments.yolo_precision.evaluate
+Requires train.py to have produced the model weights at perception.yolo_segment.MODEL_PATH.
 
 Success criteria (design spec Section 4): candidate mean 3D error must be
 both >=40% lower than baseline AND under 1cm absolute to justify a Phase 2
@@ -22,6 +22,7 @@ from ultralytics import YOLO
 from experiments.yolo_precision.generate_dataset import sample_frame
 from perception.camera import CameraIntrinsics
 from perception.segment import segment_object_centroid
+from perception.yolo_segment import MODEL_PATH
 from run_conveyor_demo import _camera_point_to_world
 from sim.conveyor_scene import OBJECT_HALF_HEIGHT_M, ConveyorSceneEnv
 
@@ -77,7 +78,7 @@ def main() -> None:
     parser.add_argument("--save-samples", type=int, default=10)
     args = parser.parse_args()
 
-    weights = _DATA_DIR / "cube_detector.pt"
+    weights = MODEL_PATH
     if not weights.exists():
         raise FileNotFoundError(f"{weights} not found -- run train.py first.")
     model = YOLO(str(weights))

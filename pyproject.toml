@@ -11,6 +11,18 @@ dependencies = [
     "pyyaml>=6.0",
     "defusedxml>=0.7.1",
     "opencv-python>=5.0.0.93",
+    "ultralytics>=8.3.0",
+    # torch is already a transitive dependency of ultralytics, but
+    # [tool.uv.sources] below only overrides the source of *direct*
+    # dependencies -- it has to be listed here for the Linux CPU-wheel
+    # override to take effect at all.
+    "torch",
+    # torchvision must be overridden in lockstep with torch: mixing a +cpu
+    # torch with a default-index torchvision gives
+    # "RuntimeError: operator torchvision::nms does not exist" at inference
+    # time, because their compiled extensions are built against different
+    # torch builds.
+    "torchvision",
 ]
 
 [dependency-groups]
@@ -19,31 +31,22 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.16.1",
 ]
-yolo-precision = [
-    "ultralytics>=8.3.0",
-    # torch/torchvision are already transitive deps of ultralytics, but
-    # [tool.uv.sources] below only overrides the source of *direct*
-    # dependencies -- listing them explicitly here is required for the
-    # CUDA-index override to actually take effect (verified: without these
-    # two lines, `uv lock -v` shows torch/torchvision resolved straight off
-    # pypi.org regardless of the sources table, since ultralytics pulls
-    # them in transitively).
-    "torch",
-    "torchvision",
-]
 
 [tool.uv.sources]
-# PyPI's default torch/torchvision wheels are CPU-only; pull CUDA-enabled
-# builds from PyTorch's own index instead so the yolo-precision group's GPU
-# training actually uses the GPU (cu130 matches this machine's driver-
-# reported CUDA 13.2 and has win_amd64 wheels for the resolved torch/
-# torchvision versions).
-torch = { index = "pytorch-cu130" }
-torchvision = { index = "pytorch-cu130" }
+# On Linux, PyPI's default torch wheel is the CUDA build, which pulls in
+# `triton`. Importing triton segfaults on GPU-less CI runners (observed:
+# "Fatal Python error: Segmentation fault" inside triton/knobs.py during
+# test collection, exit 139, on both the 3.11 and 3.12 matrix legs). CI
+# has no GPU, so the CPU wheel is the correct build there and avoids
+# triton entirely. Scoped to Linux so a developer machine with a real GPU
+# (e.g. Windows + CUDA) still resolves the normal accelerated build --
+# which experiments/yolo_precision/train.py needs for `device=0`.
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [tool.pytest.ini_options]
