@@ -449,8 +449,27 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
         qdot_cmd = np.zeros(7)
         if last_meas is None:
             continue
-        _, tcp_rot = panda_tcp_pose_numpy(q_current)
-        closing_axis = tcp_rot[:, 1]
+        # The crossing signal is projected onto the object's own direction
+        # of travel, not the gripper's closing axis (`tcp_rot[:, 1]`, used
+        # here previously). The Panda's posture at this pose puts that
+        # closing axis mostly along world-X (~0.93) while the object moves
+        # almost entirely along Y -- so the old projection was dominated by
+        # a near-constant, low-signal component and only barely sensitive
+        # to the actual Y-crossing it was meant to detect. That was masked
+        # by the cube-tipping bug (issue #27): the resulting drag
+        # coincidentally kept the timing in range. Fixing the tipping
+        # (base-drive change in sim/conveyor_scene.py) changed the timing
+        # enough to expose it -- contact_verified flipped True -> False
+        # with the axis unchanged. Projecting onto travel direction instead
+        # measures the thing that's actually supposed to trigger the
+        # grasp: has the object, moving along its own path, reached the
+        # TCP -- independent of whatever the arm's wrist happens to be
+        # oriented to at commit time.
+        if speed > 1e-3:
+            travel_axis = vel_horizontal / speed
+        else:
+            _, tcp_rot = panda_tcp_pose_numpy(q_current)
+            travel_axis = tcp_rot[:, 1]
         elapsed = step * config["dt"] - last_meas_t
         # Deliberately uses the full obj_vel (including its z component)
         # here, NOT vel_horizontal -- even though the rendezvous-point
@@ -463,7 +482,7 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
         # still contact_verified: True. Do not "fix" this to match the rule
         # above without re-measuring.
         predicted = last_meas + obj_vel * (elapsed + _CLOSE_LEAD_S)
-        offset = float(np.dot(predicted - ee_pos, closing_axis))
+        offset = float(np.dot(predicted - ee_pos, travel_axis))
         crossed = prev_offset is not None and (
             offset == 0.0 or (prev_offset < 0.0) != (offset < 0.0)
         )
