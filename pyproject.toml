@@ -12,6 +12,11 @@ dependencies = [
     "defusedxml>=0.7.1",
     "opencv-python>=5.0.0.93",
     "ultralytics>=8.3.0",
+    # torch is already a transitive dependency of ultralytics, but
+    # [tool.uv.sources] below only overrides the source of *direct*
+    # dependencies -- it has to be listed here for the Linux CPU-wheel
+    # override to take effect at all.
+    "torch",
 ]
 
 [dependency-groups]
@@ -20,6 +25,22 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.16.1",
 ]
+
+[tool.uv.sources]
+# On Linux, PyPI's default torch wheel is the CUDA build, which pulls in
+# `triton`. Importing triton segfaults on GPU-less CI runners (observed:
+# "Fatal Python error: Segmentation fault" inside triton/knobs.py during
+# test collection, exit 139, on both the 3.11 and 3.12 matrix legs). CI
+# has no GPU, so the CPU wheel is the correct build there and avoids
+# triton entirely. Scoped to Linux so a developer machine with a real GPU
+# (e.g. Windows + CUDA) still resolves the normal accelerated build --
+# which experiments/yolo_precision/train.py needs for `device=0`.
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
