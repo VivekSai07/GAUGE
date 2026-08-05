@@ -17,6 +17,12 @@ dependencies = [
     # dependencies -- it has to be listed here for the Linux CPU-wheel
     # override to take effect at all.
     "torch",
+    # torchvision must be overridden in lockstep with torch: mixing a +cpu
+    # torch with a default-index torchvision gives
+    # "RuntimeError: operator torchvision::nms does not exist" at inference
+    # time, because their compiled extensions are built against different
+    # torch builds.
+    "torchvision",
 ]
 
 [dependency-groups]
@@ -36,6 +42,7 @@ dev = [
 # (e.g. Windows + CUDA) still resolves the normal accelerated build --
 # which experiments/yolo_precision/train.py needs for `device=0`.
 torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
