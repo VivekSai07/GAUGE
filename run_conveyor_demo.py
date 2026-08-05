@@ -589,9 +589,38 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
     return result
 
 
+def _format_result(result: dict) -> str:
+    """Render an episode result as an aligned, human-readable block.
+
+    The raw dict is dense enough that the two numbers that actually decide
+    success -- `contact_verified` (did the grasp survive the lift) and
+    `object_peak_height_gain_m` (was the object genuinely carried upward)
+    -- are easy to miss when skimming a single printed line. Units and a
+    pass/fail marker are attached here rather than in the returned dict so
+    programmatic callers (tests, sweeps) keep the plain values.
+    """
+    units = {
+        "grasp_error_m": "m",
+        "object_height_gain_m": "m",
+        "object_peak_height_gain_m": "m",
+    }
+    width = max(len(k) for k in result)
+    lines = ["Episode result:"]
+    for key, value in result.items():
+        if isinstance(value, float):
+            shown = f"{value:.4f} {units.get(key, '')}".rstrip()
+        else:
+            shown = str(value)
+        marker = ""
+        if key == "contact_verified":
+            marker = "   <- grasp survived the lift" if value else "   <- GRASP FAILED"
+        lines.append(f"  {key:<{width}} : {shown}{marker}")
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
     import sys
 
     with open("configs/conveyor.yaml") as f:
         cfg = yaml.safe_load(f)
-    print(run_one_episode(cfg, render="--render" in sys.argv))
+    print(_format_result(run_one_episode(cfg, render="--render" in sys.argv)))

@@ -115,6 +115,72 @@ project's configured speed (0.08 m/s commanded) is one of the passing ones;
 note that these are *commanded* belt speeds, and the object's actual
 measured speed at the 0.08 setting is closer to **0.062 m/s**.
 
+## How it works
+
+Each control tick (20 Hz) runs the full chain left to right; the approach
+controller underneath is a four-phase state machine that decides *where*
+to steer and *when* to close.
+
+```mermaid
+flowchart LR
+    subgraph SIM["sim/ — MuJoCo"]
+        SCENE["Conveyor scene<br/>Panda + cube"]
+        CAM["Eye-in-hand<br/>RGB-D camera"]
+    end
+
+    subgraph PERC["perception/"]
+        YOLO["yolo_centroid<br/>YOLO box → top-face centroid<br/>→ colour-gated depth"]
+    end
+
+    subgraph EST["tracking/ + prediction/"]
+        KF["Constant-velocity KF<br/>Mahalanobis gating<br/>m/n confirmation"]
+    end
+
+    subgraph ACT["control/ + manipulation/"]
+        FSM["Rendezvous state machine"]
+        MPC["Kinematic MPC<br/>CasADi + IPOPT"]
+    end
+
+    SCENE --> CAM --> YOLO -->|"world-frame point<br/>or None (miss)"| KF
+    KF -->|"position + velocity"| FSM
+    FSM -->|"target"| MPC -->|"joint velocities"| SCENE
+    FSM -->|"close / lift"| SCENE
+```
+
+The state machine is what makes the grasp work. Earlier rounds *pursued*
+the cube — chasing its live estimate and closing on proximity — which
+measurably never converges: the arm's closest approach is a transient
+fly-by, after which it falls behind. It now **rendezvous** instead:
+
+```mermaid
+stateDiagram-v2
+    [*] --> TRACK
+    TRACK --> GOTO: track CONFIRMED<br/>and velocity usable
+    GOTO --> WAIT: arm settled<br/>(converged, stalled, or timeout)
+    WAIT --> CLOSE: object crosses the TCP<br/>along the finger-closing axis
+    CLOSE --> [*]: lift 10 cm,<br/>then verify contact
+
+    note right of TRACK
+        Hold still; let the
+        filter converge.
+    end note
+    note right of GOTO
+        Drive to a point AHEAD
+        of the cube on its path.
+    end note
+    note right of WAIT
+        Arm fully stopped, gripper
+        open, straddling the path.
+        Camera is blind here, so
+        this dead-reckons.
+    end note
+```
+
+Steering target and close trigger are deliberately **decoupled**: the arm
+steers to the rendezvous point, but the gripper fires on the *object's*
+own predicted position. Conflating them makes the arm commit ahead of the
+cube — a measured regression.
+
 ## Running it
 
 ```bash
