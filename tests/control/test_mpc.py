@@ -340,6 +340,4 @@ def test_solve_without_look_at_target_disables_the_term_for_that_call():
 
     qdot_active_no_target = mpc_active.solve(q0, target)
     qdot_inert_no_target = mpc_inert.solve(q0, target)
-    np.testing.assert_allclose(
-        qdot_active_no_target, qdot_inert_no_target, atol=1e-9
-    )
+    np.testing.assert_allclose(qdot_active_no_target, qdot_inert_no_target, atol=1e-9)

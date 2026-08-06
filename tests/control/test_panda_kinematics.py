@@ -171,12 +171,8 @@ def test_casadi_camera_pose_matches_independent_numpy_camera_pose():
     for q in [np.zeros(7)] + [rng.uniform(-1.5, 1.5, size=7) for _ in range(5)]:
         casadi_pos, casadi_fwd = pose_fn(q)
         numpy_pos, numpy_fwd = camera_pose_numpy(q)
-        np.testing.assert_allclose(
-            np.array(casadi_pos).flatten(), numpy_pos, atol=1e-6
-        )
-        np.testing.assert_allclose(
-            np.array(casadi_fwd).flatten(), numpy_fwd, atol=1e-6
-        )
+        np.testing.assert_allclose(np.array(casadi_pos).flatten(), numpy_pos, atol=1e-6)
+        np.testing.assert_allclose(np.array(casadi_fwd).flatten(), numpy_fwd, atol=1e-6)
 
 
 def test_camera_forward_is_unit_length():
