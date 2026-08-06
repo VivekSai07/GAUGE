@@ -157,7 +157,7 @@ stateDiagram-v2
     [*] --> TRACK
     TRACK --> GOTO: track CONFIRMED<br/>and velocity usable
     GOTO --> WAIT: arm settled<br/>(converged, stalled, or timeout)
-    WAIT --> CLOSE: object crosses the TCP<br/>along the finger-closing axis
+    WAIT --> CLOSE: object crosses the TCP<br/>along its own direction of travel
     CLOSE --> [*]: lift 10 cm,<br/>then verify contact
 
     note right of TRACK

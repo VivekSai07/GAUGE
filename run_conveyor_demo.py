@@ -183,9 +183,9 @@ integration debugging (see task-12-report.md for the full narrative):
     rendezvous point 1.9cm too high), WAIT (arm fully stopped, gripper
     open, dead-reckoning the object from the last verified measurement),
     and the close trigger (fires when the dead-reckoned object position
-    crosses the TCP along the gripper's closing axis, `_CLOSE_LEAD_S`
-    ahead to cover finger-closing dead time). The steering target (the
-    rendezvous point) and the close trigger (distance to the object
+    crosses the TCP along the object's own direction of travel,
+    `_CLOSE_LEAD_S` ahead to cover finger-closing dead time). The steering
+    target (the rendezvous point) and the close trigger (distance to the object
     itself) are deliberately decoupled -- conflating them made an earlier
     lead-compensation attempt worse, since the arm would then commit at
     the lead point, ahead of the cube, instead of where the cube actually
@@ -216,7 +216,6 @@ from ultralytics import YOLO
 from control.mpc import KinematicMPC
 from control.panda_kinematics import (
     panda_tcp_numpy,
-    panda_tcp_pose_numpy,
     panda_tcp_pose_symbolic,
     panda_tcp_symbolic,
 )
@@ -465,11 +464,21 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
         # grasp: has the object, moving along its own path, reached the
         # TCP -- independent of whatever the arm's wrist happens to be
         # oriented to at commit time.
-        if speed > 1e-3:
-            travel_axis = vel_horizontal / speed
-        else:
-            _, tcp_rot = panda_tcp_pose_numpy(q_current)
-            travel_axis = tcp_rot[:, 1]
+        #
+        # When speed is too low to give a reliable travel direction (e.g.
+        # early WAIT ticks right after a track rebuild, when the KF
+        # re-initializes with zero velocity), there is no usable crossing
+        # axis at all -- NOT a reason to fall back to the closing axis. The
+        # travel and closing axes are close to orthogonal at this posture,
+        # so a tick where `speed` crosses the threshold could flip the
+        # projection axis by ~90 degrees between two consecutive ticks and
+        # spuriously flip `offset`'s sign, firing CLOSE with no real
+        # crossing. Instead, drop this tick's signal entirely and wait for
+        # the next one with a usable speed.
+        if speed <= 1e-3:
+            prev_offset = None
+            continue
+        travel_axis = vel_horizontal / speed
         elapsed = step * config["dt"] - last_meas_t
         # Deliberately uses the full obj_vel (including its z component)
         # here, NOT vel_horizontal -- even though the rendezvous-point

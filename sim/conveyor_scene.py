@@ -171,6 +171,13 @@ _HOME_KEYFRAME = "home"
 # used to build the object's geometry, instead of a second hardcoded copy of
 # "0.02". See design spec Section 12 for the full accuracy-bias writeup.
 OBJECT_HALF_HEIGHT_M = 0.02
+# Conveyor platform's top surface height (m), i.e. the object's base
+# z-coordinate when resting on it (and the value the object body/joint
+# frame's own `pos` and the "home" keyframe's qpos must both use, since a
+# free joint's qpos slot stores the body frame origin -- see the base-drive
+# comment above the object body definition). Used in both places below so
+# they can't drift out of sync with each other.
+_PLATFORM_TOP_Z = 0.03
 # Task 13: arm-only resting configuration that cuts the required descent to
 # the conveyor object's operating height by ~42% versus `home` (hand height
 # ~0.38m vs. `home`'s ~0.62m), chosen from a systematic height sweep (~0.11m
@@ -275,7 +282,7 @@ def _build_model_xml() -> str:
     # to break the grasp -- see design spec, Section on rejected approach).
     obj_body = ET.SubElement(worldbody, "body")
     obj_body.set("name", "conveyor_object")
-    obj_body.set("pos", "0.5 -0.3 0.03")
+    obj_body.set("pos", f"0.5 -0.3 {_PLATFORM_TOP_Z}")
     obj_joint = ET.SubElement(obj_body, "joint")
     obj_joint.set("name", "conveyor_object_joint")
     obj_joint.set("type", "free")
@@ -332,7 +339,9 @@ def _build_model_xml() -> str:
     if keyframe is not None:
         for key in keyframe.findall("key"):
             if key.get("name") == _HOME_KEYFRAME:
-                key.set("qpos", key.get("qpos") + " 0.5 -0.3 0.03 1 0 0 0")
+                key.set(
+                    "qpos", key.get("qpos") + f" 0.5 -0.3 {_PLATFORM_TOP_Z} 1 0 0 0"
+                )
                 key.set("ctrl", key.get("ctrl") + " 0 0")
 
     return ET.tostring(root, encoding="unicode")
@@ -475,6 +484,31 @@ class ConveyorSceneEnv:
         depth = self._renderer.render().copy()
         self._renderer.disable_depth_rendering()
         return rgb, depth.astype(np.float32)
+
+    def set_object_pose(self, center, quat=(1.0, 0.0, 0.0, 0.0)) -> None:
+        """Teleport the conveyor object so its true (volumetric) center sits
+        at `center`, with orientation `quat` (w, x, y, z).
+
+        The free joint's qpos slot stores the BODY frame origin, which is
+        the object's BASE (see the base-drive comment above the body
+        definition), not its center -- so a caller writing `qpos` directly
+        with a center value would place the object `OBJECT_HALF_HEIGHT_M`
+        too high. This helper does the base/center conversion in one place
+        so callers can keep thinking and writing in terms of the object's
+        actual center, matching `get_object_ground_truth()`'s contract.
+
+        Zeroes qvel and calls `mj_forward` so the new pose is immediately
+        reflected in derived quantities (`geom_xpos`, contacts, etc.).
+        """
+        obj_jid = self.model.body("conveyor_object").jntadr[0]
+        qpos_addr = self.model.jnt_qposadr[obj_jid]
+        center = np.asarray(center, dtype=np.float64)
+        self.data.qpos[qpos_addr : qpos_addr + 3] = center - np.array(
+            [0.0, 0.0, OBJECT_HALF_HEIGHT_M]
+        )
+        self.data.qpos[qpos_addr + 3 : qpos_addr + 7] = quat
+        self.data.qvel[:] = 0
+        mujoco.mj_forward(self.model, self.data)
 
     def get_object_ground_truth(self) -> np.ndarray:
         # geom_xpos, not the body's xpos: the body frame origin sits at the

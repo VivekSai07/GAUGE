@@ -165,17 +165,11 @@ def test_is_grasped_true_when_both_fingers_contact_the_object():
     it past the fingers first)."""
     env = ConveyorSceneEnv(conveyor_velocity=np.array([0.0, 0.0, 0.0]))
     env.reset()
-    obj_joint_id = env.model.body("conveyor_object").jntadr[0]
-    qpos_addr = env.model.jnt_qposadr[obj_joint_id]
-
     env.data.qpos[7:9] = 0.0  # fingers already closed
     env.set_gripper(closed=True)
     mujoco.mj_forward(env.model, env.data)
 
     tcp_pos, _ = panda_tcp_pose_numpy(env.get_joint_positions())
-    env.data.qpos[qpos_addr : qpos_addr + 3] = tcp_pos
-    env.data.qpos[qpos_addr + 3 : qpos_addr + 7] = [1, 0, 0, 0]
-    env.data.qvel[:] = 0
-    mujoco.mj_forward(env.model, env.data)
+    env.set_object_pose(tcp_pos, [1, 0, 0, 0])
 
     assert env.is_grasped() is True
