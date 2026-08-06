@@ -30,6 +30,8 @@ class KinematicMPC:
         terminal_weight: float = 0.0,
         pose_fk_func: ca.Function | None = None,
         lateral_axis_weight: float = 0.0,
+        camera_fk_func: ca.Function | None = None,
+        look_at_weight: float = 0.0,
     ):
         """
         ``posture_target``/``posture_weight`` (Task 12 integration finding,
@@ -79,6 +81,22 @@ class KinematicMPC:
         axis specifically, biasing the solver toward a wrist orientation
         that actually centers the object between the fingers, not just
         near the TCP in aggregate distance.
+
+        ``camera_fk_func``/``look_at_weight`` (#36 -- additive and
+        backward-compatible: `None`/0.0 keeps the original behavior):
+        measured directly (see the Round 7 look-at MPC cost design spec),
+        the wrist camera loses the tracked object the instant GOTO starts
+        moving the arm, well before the object is actually out of range --
+        because the position-only Cartesian cost leaves the wrist's
+        orientation nullspace free to rotate the camera away from the
+        object with no penalty for doing so. `camera_fk_func` (e.g.
+        `camera_pose_symbolic()`) supplies the camera's world position and
+        boresight direction; when `look_at_weight > 0.0`, an extra cost
+        term penalizes `1 - cos(angle)` between the boresight and the
+        direction to `look_at_target` (a new `.solve()` parameter,
+        typically the object's live tracked position) at every horizon
+        step, biasing the solver toward wrist orientations that keep the
+        object in view while still reaching the position target.
         """
         self.horizon = horizon
         self.dt = dt
@@ -89,6 +107,7 @@ class KinematicMPC:
         Qdot = opti.variable(self.n_joints, horizon)  # joint velocity commands
         q0_param = opti.parameter(self.n_joints)
         target_param = opti.parameter(3)
+        look_at_target_param = opti.parameter(3)
 
         opti.subject_to(Q[:, 0] == q0_param)
         cost = 0
@@ -109,6 +128,16 @@ class KinematicMPC:
                 lateral_axis = pose_rot[:, 0]
                 lateral_offset = ca.dot(lateral_axis, pose_pos - target_param)
                 cost += lateral_axis_weight * lateral_offset**2
+            if camera_fk_func is not None and look_at_weight > 0.0:
+                cam_pos, cam_forward = camera_fk_func(Q[:, k + 1])
+                direction = look_at_target_param - cam_pos
+                # Small epsilon keeps the gradient finite if direction's
+                # norm is ever near zero (not expected in practice, since
+                # the tracked object is never at the camera's own
+                # position, but cheap to guard against).
+                direction_norm = ca.sqrt(ca.sumsqr(direction) + 1e-9)
+                cos_angle = ca.dot(cam_forward, direction) / direction_norm
+                cost += look_at_weight * (1.0 - cos_angle)
 
         opti.minimize(cost)
         # print_level=0 + sb="yes" suppresses IPOPT's banner/iteration log;
@@ -120,13 +149,20 @@ class KinematicMPC:
         self._Qdot = Qdot
         self._q0_param = q0_param
         self._target_param = target_param
+        self._look_at_target_param = look_at_target_param
+        self._look_at_active = camera_fk_func is not None and look_at_weight > 0.0
         # Warm-start memory across .solve() calls -- see solve()'s docstring
         # for why this matters for a receding-horizon controller called
         # repeatedly against a moving target.
         self._prev_Q_sol: np.ndarray | None = None
         self._prev_Qdot_sol: np.ndarray | None = None
 
-    def solve(self, q_current: np.ndarray, target_pos: np.ndarray) -> np.ndarray:
+    def solve(
+        self,
+        q_current: np.ndarray,
+        target_pos: np.ndarray,
+        look_at_target: np.ndarray | None = None,
+    ) -> np.ndarray:
         """Solve one receding-horizon step and return the first joint-velocity
         command.
 
@@ -152,6 +188,11 @@ class KinematicMPC:
         """
         self._opti.set_value(self._q0_param, q_current)
         self._opti.set_value(self._target_param, target_pos)
+        if self._look_at_active:
+            self._opti.set_value(
+                self._look_at_target_param,
+                target_pos if look_at_target is None else look_at_target,
+            )
 
         if self._prev_Q_sol is None:
             q_init = np.tile(q_current.reshape(-1, 1), (1, self.horizon + 1))
