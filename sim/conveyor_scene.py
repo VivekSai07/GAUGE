@@ -171,6 +171,13 @@ _HOME_KEYFRAME = "home"
 # used to build the object's geometry, instead of a second hardcoded copy of
 # "0.02". See design spec Section 12 for the full accuracy-bias writeup.
 OBJECT_HALF_HEIGHT_M = 0.02
+# Conveyor platform's top surface height (m), i.e. the object's base
+# z-coordinate when resting on it (and the value the object body/joint
+# frame's own `pos` and the "home" keyframe's qpos must both use, since a
+# free joint's qpos slot stores the body frame origin -- see the base-drive
+# comment above the object body definition). Used in both places below so
+# they can't drift out of sync with each other.
+_PLATFORM_TOP_Z = 0.03
 # Task 13: arm-only resting configuration that cuts the required descent to
 # the conveyor object's operating height by ~42% versus `home` (hand height
 # ~0.38m vs. `home`'s ~0.62m), chosen from a systematic height sweep (~0.11m
@@ -259,9 +266,23 @@ def _build_model_xml() -> str:
     # body driven directly by a velocity actuator (not carried by belt
     # friction), so it's still exactly constant-velocity by design, but is
     # now a real body the gripper can physically nudge, grip, and hold.
+    # The body frame origin (where the free joint lives, and therefore where
+    # the velocity actuators below apply their force) is placed at the
+    # object's BASE, not its center -- see issue #27. A free joint's
+    # translational DOFs push the body frame origin directly; with the
+    # origin at the center (as originally built), the drive force passed
+    # straight through the center of mass while the platform's friction
+    # reaction acted 2cm below it at the base, producing a tipping couple
+    # (measured: 77 deg of tilt by grasp time at the shipped friction=3.0).
+    # Anchoring the origin at the base co-locates the drive force with the
+    # friction reaction that opposes it, removing the moment arm at the
+    # source instead of lowering friction to reduce its effect (the
+    # decoupled-pair-friction approach tried first, which killed the
+    # tipping torque but also changed the object's travel dynamics enough
+    # to break the grasp -- see design spec, Section on rejected approach).
     obj_body = ET.SubElement(worldbody, "body")
     obj_body.set("name", "conveyor_object")
-    obj_body.set("pos", "0.5 -0.3 0.05")
+    obj_body.set("pos", f"0.5 -0.3 {_PLATFORM_TOP_Z}")
     obj_joint = ET.SubElement(obj_body, "joint")
     obj_joint.set("name", "conveyor_object_joint")
     obj_joint.set("type", "free")
@@ -269,6 +290,11 @@ def _build_model_xml() -> str:
     geom = ET.SubElement(obj_body, "geom")
     geom.set("name", "conveyor_object_geom")
     geom.set("type", "box")
+    # Offset up by half the cube's height within the body frame so the geom
+    # (and its center of mass) still sits at world z=0.05 -- the "conveyor
+    # operating height" every other module assumes -- while the body/joint
+    # origin above stays at the base.
+    geom.set("pos", f"0 0 {OBJECT_HALF_HEIGHT_M}")
     geom.set(
         "size", f"{OBJECT_HALF_HEIGHT_M} {OBJECT_HALF_HEIGHT_M} {OBJECT_HALF_HEIGHT_M}"
     )
@@ -281,7 +307,10 @@ def _build_model_xml() -> str:
     # slipped downward and out under gravity (μ=1.0 gives too little
     # friction force at the actuator's actual squeeze force to support the
     # object's own weight). At 3.0, contact holds stably for a sustained
-    # ~0.6s window post-grasp (well beyond _POST_GRASP_SETTLE_STEPS).
+    # ~0.6s window post-grasp (well beyond _POST_GRASP_SETTLE_STEPS). This
+    # value stays unchanged by the base-drive fix above -- it addresses a
+    # different contact pair (fingers-vs-object) and grip strength is
+    # unaffected by where the drive force is applied.
     geom.set("friction", "3.0 0.5 0.1")
 
     actuator = root.find("actuator")
@@ -310,7 +339,9 @@ def _build_model_xml() -> str:
     if keyframe is not None:
         for key in keyframe.findall("key"):
             if key.get("name") == _HOME_KEYFRAME:
-                key.set("qpos", key.get("qpos") + " 0.5 -0.3 0.05 1 0 0 0")
+                key.set(
+                    "qpos", key.get("qpos") + f" 0.5 -0.3 {_PLATFORM_TOP_Z} 1 0 0 0"
+                )
                 key.set("ctrl", key.get("ctrl") + " 0 0")
 
     return ET.tostring(root, encoding="unicode")
@@ -325,6 +356,7 @@ class ConveyorSceneEnv:
         self.conveyor_velocity = np.asarray(conveyor_velocity, dtype=np.float64)
         self.data = mujoco.MjData(self.model)
         self._obj_body_id = self.model.body("conveyor_object").id
+        self._obj_geom_id = self.model.geom("conveyor_object_geom").id
         self._obj_vel_x_id = self.model.actuator("conveyor_object_vel_x").id
         self._obj_vel_y_id = self.model.actuator("conveyor_object_vel_y").id
         self._arm_ctrlrange = self.model.actuator_ctrlrange[:7].copy()
@@ -453,8 +485,37 @@ class ConveyorSceneEnv:
         self._renderer.disable_depth_rendering()
         return rgb, depth.astype(np.float32)
 
+    def set_object_pose(self, center, quat=(1.0, 0.0, 0.0, 0.0)) -> None:
+        """Teleport the conveyor object so its true (volumetric) center sits
+        at `center`, with orientation `quat` (w, x, y, z).
+
+        The free joint's qpos slot stores the BODY frame origin, which is
+        the object's BASE (see the base-drive comment above the body
+        definition), not its center -- so a caller writing `qpos` directly
+        with a center value would place the object `OBJECT_HALF_HEIGHT_M`
+        too high. This helper does the base/center conversion in one place
+        so callers can keep thinking and writing in terms of the object's
+        actual center, matching `get_object_ground_truth()`'s contract.
+
+        Zeroes qvel and calls `mj_forward` so the new pose is immediately
+        reflected in derived quantities (`geom_xpos`, contacts, etc.).
+        """
+        obj_jid = self.model.body("conveyor_object").jntadr[0]
+        qpos_addr = self.model.jnt_qposadr[obj_jid]
+        center = np.asarray(center, dtype=np.float64)
+        self.data.qpos[qpos_addr : qpos_addr + 3] = center - np.array(
+            [0.0, 0.0, OBJECT_HALF_HEIGHT_M]
+        )
+        self.data.qpos[qpos_addr + 3 : qpos_addr + 7] = quat
+        self.data.qvel[:] = 0
+        mujoco.mj_forward(self.model, self.data)
+
     def get_object_ground_truth(self) -> np.ndarray:
-        return self.data.xpos[self._obj_body_id].copy()
+        # geom_xpos, not the body's xpos: the body frame origin sits at the
+        # object's base (see the base-drive comment above the body
+        # definition), but ground truth must stay the object's actual
+        # center, which is what the geom's own offset resolves to.
+        return self.data.geom_xpos[self._obj_geom_id].copy()
 
     def get_joint_positions(self) -> np.ndarray:
         return self.data.qpos[:7].copy()

@@ -1,4 +1,3 @@
-import mujoco
 import numpy as np
 
 from perception.camera import CameraIntrinsics
@@ -7,16 +6,11 @@ from sim.conveyor_scene import OBJECT_HALF_HEIGHT_M, ConveyorSceneEnv
 
 
 def _place_cube_in_view(env: ConveyorSceneEnv, x: float, y: float, z: float) -> None:
-    """Teleport the conveyor object to a known pose within the same
-    x/y/z envelope experiments/yolo_precision/generate_dataset.py trained
-    on, and re-derive the physics state. No settling needed -- this is a
+    """Teleport the conveyor object's true center to (x, y, z), within the
+    same envelope experiments/yolo_precision/generate_dataset.py trained on,
+    and re-derive the physics state. No settling needed -- this is a
     single-frame render, not a dynamics test."""
-    obj_jid = env.model.body("conveyor_object").jntadr[0]
-    obj_qpos_addr = env.model.jnt_qposadr[obj_jid]
-    env.data.qpos[obj_qpos_addr : obj_qpos_addr + 3] = [x, y, z]
-    env.data.qpos[obj_qpos_addr + 3 : obj_qpos_addr + 7] = [1.0, 0.0, 0.0, 0.0]
-    env.data.qvel[:] = 0
-    mujoco.mj_forward(env.model, env.data)
+    env.set_object_pose([x, y, z])
 
 
 def test_yolo_centroid_finds_cube_near_ground_truth():

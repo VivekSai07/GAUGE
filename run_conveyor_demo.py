@@ -183,9 +183,9 @@ integration debugging (see task-12-report.md for the full narrative):
     rendezvous point 1.9cm too high), WAIT (arm fully stopped, gripper
     open, dead-reckoning the object from the last verified measurement),
     and the close trigger (fires when the dead-reckoned object position
-    crosses the TCP along the gripper's closing axis, `_CLOSE_LEAD_S`
-    ahead to cover finger-closing dead time). The steering target (the
-    rendezvous point) and the close trigger (distance to the object
+    crosses the TCP along the object's own direction of travel,
+    `_CLOSE_LEAD_S` ahead to cover finger-closing dead time). The steering
+    target (the rendezvous point) and the close trigger (distance to the object
     itself) are deliberately decoupled -- conflating them made an earlier
     lead-compensation attempt worse, since the arm would then commit at
     the lead point, ahead of the cube, instead of where the cube actually
@@ -216,7 +216,6 @@ from ultralytics import YOLO
 from control.mpc import KinematicMPC
 from control.panda_kinematics import (
     panda_tcp_numpy,
-    panda_tcp_pose_numpy,
     panda_tcp_pose_symbolic,
     panda_tcp_symbolic,
 )
@@ -449,8 +448,37 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
         qdot_cmd = np.zeros(7)
         if last_meas is None:
             continue
-        _, tcp_rot = panda_tcp_pose_numpy(q_current)
-        closing_axis = tcp_rot[:, 1]
+        # The crossing signal is projected onto the object's own direction
+        # of travel, not the gripper's closing axis (`tcp_rot[:, 1]`, used
+        # here previously). The Panda's posture at this pose puts that
+        # closing axis mostly along world-X (~0.93) while the object moves
+        # almost entirely along Y -- so the old projection was dominated by
+        # a near-constant, low-signal component and only barely sensitive
+        # to the actual Y-crossing it was meant to detect. That was masked
+        # by the cube-tipping bug (issue #27): the resulting drag
+        # coincidentally kept the timing in range. Fixing the tipping
+        # (base-drive change in sim/conveyor_scene.py) changed the timing
+        # enough to expose it -- contact_verified flipped True -> False
+        # with the axis unchanged. Projecting onto travel direction instead
+        # measures the thing that's actually supposed to trigger the
+        # grasp: has the object, moving along its own path, reached the
+        # TCP -- independent of whatever the arm's wrist happens to be
+        # oriented to at commit time.
+        #
+        # When speed is too low to give a reliable travel direction (e.g.
+        # early WAIT ticks right after a track rebuild, when the KF
+        # re-initializes with zero velocity), there is no usable crossing
+        # axis at all -- NOT a reason to fall back to the closing axis. The
+        # travel and closing axes are close to orthogonal at this posture,
+        # so a tick where `speed` crosses the threshold could flip the
+        # projection axis by ~90 degrees between two consecutive ticks and
+        # spuriously flip `offset`'s sign, firing CLOSE with no real
+        # crossing. Instead, drop this tick's signal entirely and wait for
+        # the next one with a usable speed.
+        if speed <= 1e-3:
+            prev_offset = None
+            continue
+        travel_axis = vel_horizontal / speed
         elapsed = step * config["dt"] - last_meas_t
         # Deliberately uses the full obj_vel (including its z component)
         # here, NOT vel_horizontal -- even though the rendezvous-point
@@ -463,7 +491,7 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
         # still contact_verified: True. Do not "fix" this to match the rule
         # above without re-measuring.
         predicted = last_meas + obj_vel * (elapsed + _CLOSE_LEAD_S)
-        offset = float(np.dot(predicted - ee_pos, closing_axis))
+        offset = float(np.dot(predicted - ee_pos, travel_axis))
         crossed = prev_offset is not None and (
             offset == 0.0 or (prev_offset < 0.0) != (offset < 0.0)
         )

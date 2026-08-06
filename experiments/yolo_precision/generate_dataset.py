@@ -19,7 +19,6 @@ import argparse
 from pathlib import Path
 
 import cv2
-import mujoco
 import numpy as np
 
 from sim.conveyor_scene import OBJECT_HALF_HEIGHT_M, ConveyorSceneEnv
@@ -72,24 +71,17 @@ def sample_frame(
     """Place the cube at a random pose, render, and compute its exact pixel
     bounding box. Returns None if the box degenerates (fully clipped or
     behind the camera) -- callers should retry with a new sample."""
-    obj_jid = env.model.body("conveyor_object").jntadr[0]
-    obj_qpos_addr = env.model.jnt_qposadr[obj_jid]
-
     x = rng.uniform(*_X_RANGE)
     y = rng.uniform(*_Y_RANGE)
     yaw = rng.uniform(0.0, 2 * np.pi)
     center = np.array([x, y, _Z])
 
-    env.data.qpos[obj_qpos_addr : obj_qpos_addr + 3] = center
     half_yaw = yaw / 2.0
-    env.data.qpos[obj_qpos_addr + 3 : obj_qpos_addr + 7] = [
-        np.cos(half_yaw),
-        0.0,
-        0.0,
-        np.sin(half_yaw),
-    ]
-    env.data.qvel[:] = 0
-    mujoco.mj_forward(env.model, env.data)
+    quat = [np.cos(half_yaw), 0.0, 0.0, np.sin(half_yaw)]
+    # set_object_pose takes the cube's true center and converts to the
+    # base-frame qpos the free joint actually stores (see sim/conveyor_scene.py
+    # -- the object's body/joint origin is at its base, not its center).
+    env.set_object_pose(center, quat)
 
     rgb, _ = env.get_rgbd(width, height)
     cam_id = env.model.camera("wrist_cam").id
