@@ -67,6 +67,16 @@ _TCP_OFFSET_Z = 0.1029
 # alone (`panda_fk_*`/`panda_tcp_*` above) does not need this correction,
 # since it doesn't depend on the frame's rotational convention at all.
 _HAND_FRAME_Z_ROTATION = -np.pi / 4
+# Fixed offset from the hand-frame origin to the wrist camera's mount
+# point, along the hand frame's local Z axis -- matches
+# sim/conveyor_scene.py's real MJCF camera element (pos="0 0 0.05"). The
+# camera's own euler="{pi} 0 0" mount rotation (180 degrees about local X)
+# is not applied separately here: composing it with a MuJoCo camera's
+# local -Z-is-forward convention algebraically cancels back to the hand
+# frame's own +Z axis, so `camera_forward` below is simply
+# `rotation[:, 2]` -- verified against the real compiled MuJoCo camera in
+# tests/control/test_panda_kinematics.py::test_camera_pose_numpy_matches_mujoco_wrist_cam.
+_CAMERA_OFFSET_Z = 0.05
 
 
 def _dh_transform_ca(a: float, alpha: float, d: float, theta: ca.SX) -> ca.SX:
@@ -130,6 +140,25 @@ def panda_tcp_pose_symbolic() -> ca.Function:
     return ca.Function("panda_tcp_pose", [q], [tcp_pos, rotation])
 
 
+def camera_pose_symbolic() -> ca.Function:
+    """Return a CasADi Function mapping q (7,) to (camera_pos(3,),
+    camera_forward(3,)) -- the wrist camera's world position and its
+    boresight (viewing) direction, a unit vector. See `_CAMERA_OFFSET_Z`
+    for why `camera_forward` reduces to the hand frame's local Z axis.
+    """
+    q = ca.SX.sym("q", 7)
+    T = ca.SX.eye(4)
+    for i in range(7):
+        T = T @ _dh_transform_ca(_A[i], _ALPHA[i], _D[i], q[i])
+    T = T @ _dh_transform_ca(_FLANGE_A, _FLANGE_ALPHA, _FLANGE_D, 0.0)
+    T = T @ _dh_transform_ca(0.0, 0.0, 0.0, _HAND_FRAME_Z_ROTATION)
+    rotation = T[0:3, 0:3]
+    hand_pos = T[0:3, 3]
+    camera_forward = rotation[:, 2]
+    camera_pos = hand_pos + rotation[:, 2] * _CAMERA_OFFSET_Z
+    return ca.Function("camera_pose", [q], [camera_pos, camera_forward])
+
+
 def _dh_transform_np(a: float, alpha: float, d: float, theta: float) -> np.ndarray:
     """Modified-DH homogeneous transform, pure-numpy version."""
     ct, st = np.cos(theta), np.sin(theta)
@@ -175,3 +204,18 @@ def panda_tcp_pose_numpy(q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     rotation = T[0:3, 0:3].copy()
     T = T @ _dh_transform_np(0.0, 0.0, _TCP_OFFSET_Z, 0.0)
     return T[0:3, 3], rotation
+
+
+def camera_pose_numpy(q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Pure-numpy reference: q (7,) -> (camera_pos(3,), camera_forward(3,)),
+    matching `camera_pose_symbolic`."""
+    T = np.eye(4)
+    for i in range(7):
+        T = T @ _dh_transform_np(_A[i], _ALPHA[i], _D[i], q[i])
+    T = T @ _dh_transform_np(_FLANGE_A, _FLANGE_ALPHA, _FLANGE_D, 0.0)
+    T = T @ _dh_transform_np(0.0, 0.0, 0.0, _HAND_FRAME_Z_ROTATION)
+    rotation = T[0:3, 0:3].copy()
+    hand_pos = T[0:3, 3].copy()
+    camera_forward = rotation[:, 2].copy()
+    camera_pos = hand_pos + rotation[:, 2] * _CAMERA_OFFSET_Z
+    return camera_pos, camera_forward

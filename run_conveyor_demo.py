@@ -215,6 +215,7 @@ from ultralytics import YOLO
 
 from control.mpc import KinematicMPC
 from control.panda_kinematics import (
+    camera_pose_symbolic,
     panda_tcp_numpy,
     panda_tcp_pose_symbolic,
     panda_tcp_symbolic,
@@ -309,6 +310,7 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
 
     fk = panda_tcp_symbolic()
     pose_fk = panda_tcp_pose_symbolic()
+    camera_fk = camera_pose_symbolic()
     mpc_cfg = config["mpc"]
     mpc = KinematicMPC(
         fk_func=fk,
@@ -322,6 +324,8 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
         terminal_weight=mpc_cfg.get("terminal_weight", 0.0),
         pose_fk_func=pose_fk,
         lateral_axis_weight=mpc_cfg.get("lateral_axis_weight", 0.0),
+        camera_fk_func=camera_fk,
+        look_at_weight=mpc_cfg.get("look_at_weight", 0.0),
     )
 
     sim_steps_per_control = max(1, round((1.0 / config["control_hz"]) / config["dt"]))
@@ -428,7 +432,7 @@ def run_one_episode(config: dict, render: bool = False) -> dict:
             continue
 
         if phase == "GOTO":
-            qdot_cmd = mpc.solve(q_current, rendezvous)
+            qdot_cmd = mpc.solve(q_current, rendezvous, look_at_target=obj_est)
             goto_ticks += 1
             dist = float(np.linalg.norm(ee_pos - rendezvous))
             stalled = (

@@ -67,6 +67,40 @@ mpc:
   # was close in aggregate 3D distance -- see control/mpc.py's docstring
   # and design spec Section 12. This penalizes that specific offset.
   lateral_axis_weight: 25.0
+  # Swept per the Round 7 look-at-MPC-cost design spec (see docs/superpowers/
+  # specs/2026-08-06-look-at-mpc-cost-design.md, Section 5, item 5) and left
+  # OFF -- no weight tested gave a real improvement without breaking the
+  # closed loop. Measured `first_blind_step` during GOTO (baseline 2350,
+  # higher = better) for every weight below; independently ran the full
+  # 6-speed contact_verified/grasp_error_m sweep (baseline: True at all 6,
+  # grasp_error_m 0.0084-0.0119) only for 0.001, 0.005, 0.01, 1.0, 2.0, and
+  # 10.0 -- see task-3-report.md for the full per-weight table.
+  #   Independently 6-speed-swept:
+  #   0.001 -> first_blind_step 2350 (no change); 6/6 contact_verified True,
+  #            grasp_error_m 0.0105-0.0133 (safe, but zero benefit)
+  #   0.005, 0.01 -> first_blind_step 2350 (no change); 0/6 contact_verified
+  #            True (already broken, for zero benefit)
+  #   1.0, 2.0 -> first_blind_step 2375-2400 (barely moved); 1/6
+  #            contact_verified True, grasp_error_m up to 0.29
+  #   10.0 -> first_blind_step 2525, the best delay found (still <10% later
+  #            than baseline); 0/6 contact_verified True, grasp_error_m
+  #            0.024-0.076 (severe regression)
+  #   first_blind_step measured only (no independent 6-speed sweep run --
+  #   trend-consistent with 10.0's failure given the pattern above, not
+  #   independently confirmed):
+  #   0.05 -> first_blind_step 2350 (no change)
+  #   5.0, 50.0, 200.0 -> first_blind_step 2350-2375 (still <10% later than
+  #            baseline)
+  # No weight tested produced a meaningful delay -- the best case (10.0)
+  # only moved first_blind_step by ~7% over baseline, while breaking
+  # contact_verified at every speed. The range that even barely moves
+  # first_blind_step (>=5) is ~1000x the range that keeps the episode intact
+  # (<=0.001) -- these two ranges do not overlap. The term is wired in
+  # (run_conveyor_demo.py passes
+  # look_at_target=obj_est during GOTO) but left inert until a future
+  # attempt (e.g. a second cost term or re-tuned rendezvous timing) closes
+  # that gap. See task-3-report.md for the full per-weight table.
+  look_at_weight: 0.0
 
 # History: 0.03 (original spec) -> 0.11 (Task 14) -> 0.075 (Task 15's final
 # review) -> 0.035 (this fix, prompted by a user-reported visual grasp

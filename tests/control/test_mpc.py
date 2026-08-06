@@ -2,10 +2,13 @@ import numpy as np
 
 from control.mpc import KinematicMPC
 from control.panda_kinematics import (
+    camera_pose_numpy,
+    camera_pose_symbolic,
     panda_fk_numpy,
     panda_fk_symbolic,
     panda_tcp_pose_numpy,
     panda_tcp_pose_symbolic,
+    panda_tcp_symbolic,
 )
 
 
@@ -233,3 +236,108 @@ def test_lateral_axis_weight_reduces_offset_along_gripper_local_x():
         return abs(np.dot(rot[:, 0], pos - target))
 
     assert lateral_offset(q_next_with) < lateral_offset(q_next_no) - 1e-3
+
+
+def test_look_at_weight_off_by_default_is_byte_identical():
+    """camera_fk_func/look_at_weight default to None/0.0 -- omitting them
+    must reproduce the exact qdot a pre-existing caller would get."""
+    fk = panda_tcp_symbolic()
+    q_min = np.full(7, -2.8)
+    q_max = np.full(7, 2.8)
+    qdot_max = np.full(7, 1.5)
+    q0 = np.zeros(7)
+    target = np.array([0.4, 0.1, 0.4])
+
+    mpc_without_param = KinematicMPC(
+        fk_func=fk, horizon=5, dt=0.05, q_min=q_min, q_max=q_max, qdot_max=qdot_max
+    )
+    mpc_with_default_param = KinematicMPC(
+        fk_func=fk,
+        horizon=5,
+        dt=0.05,
+        q_min=q_min,
+        q_max=q_max,
+        qdot_max=qdot_max,
+        camera_fk_func=None,
+        look_at_weight=0.0,
+    )
+    qdot_a = mpc_without_param.solve(q0, target)
+    qdot_b = mpc_with_default_param.solve(q0, target)
+    np.testing.assert_allclose(qdot_a, qdot_b, atol=1e-9)
+
+
+def test_look_at_weight_biases_solution_toward_facing_the_target():
+    """With look_at_weight active, comparing the camera's boresight
+    alignment to look_at_target across two solves -- one with the term on,
+    one off, both driving to the same Cartesian target -- the aligned
+    solve's final angular deviation must be smaller. Uses a target that is
+    reachable by more than one wrist orientation (a real nullspace),
+    so the two solves are not forced to agree."""
+    fk = panda_tcp_symbolic()
+    camera_fk = camera_pose_symbolic()
+    q_min = np.full(7, -2.8)
+    q_max = np.full(7, 2.8)
+    qdot_max = np.full(7, 1.5)
+    q0 = np.array([0.0, -0.3, 0.0, -2.0, 0.0, 1.8, 0.0])
+    target = np.array([0.45, 0.15, 0.35])
+    look_at_target = np.array([0.45, 0.15, 0.05])
+
+    mpc_off = KinematicMPC(
+        fk_func=fk, horizon=5, dt=0.05, q_min=q_min, q_max=q_max, qdot_max=qdot_max
+    )
+    mpc_on = KinematicMPC(
+        fk_func=fk,
+        horizon=5,
+        dt=0.05,
+        q_min=q_min,
+        q_max=q_max,
+        qdot_max=qdot_max,
+        camera_fk_func=camera_fk,
+        look_at_weight=50.0,
+    )
+
+    def angular_deviation(qdot_cmd):
+        q_next = q0 + qdot_cmd * 0.05
+        cam_pos, cam_fwd = camera_pose_numpy(q_next)
+        direction = look_at_target - cam_pos
+        direction /= np.linalg.norm(direction)
+        cos_angle = np.dot(cam_fwd, direction)
+        return 1.0 - cos_angle
+
+    qdot_off = mpc_off.solve(q0, target)
+    qdot_on = mpc_on.solve(q0, target, look_at_target=look_at_target)
+
+    assert angular_deviation(qdot_on) < angular_deviation(qdot_off)
+
+
+def test_solve_without_look_at_target_disables_the_term_for_that_call():
+    """Omitting look_at_target on a given .solve() call must disable the
+    look-at term for that call only, regardless of the instance's
+    configured look_at_weight -- not fall back to using target_pos as the
+    look-at target. Verified by equivalence: a call without look_at_target
+    on an instance constructed with look_at_weight > 0.0 must produce the
+    exact same qdot as a call (also without look_at_target) on an
+    otherwise-identical instance constructed with look_at_weight = 0.0."""
+    fk = panda_tcp_symbolic()
+    camera_fk = camera_pose_symbolic()
+    q_min = np.full(7, -2.8)
+    q_max = np.full(7, 2.8)
+    qdot_max = np.full(7, 1.5)
+    q0 = np.zeros(7)
+    target = np.array([0.4, 0.1, 0.4])
+
+    common = {
+        "fk_func": fk,
+        "horizon": 5,
+        "dt": 0.05,
+        "q_min": q_min,
+        "q_max": q_max,
+        "qdot_max": qdot_max,
+        "camera_fk_func": camera_fk,
+    }
+    mpc_active = KinematicMPC(**common, look_at_weight=10.0)
+    mpc_inert = KinematicMPC(**common, look_at_weight=0.0)
+
+    qdot_active_no_target = mpc_active.solve(q0, target)
+    qdot_inert_no_target = mpc_inert.solve(q0, target)
+    np.testing.assert_allclose(qdot_active_no_target, qdot_inert_no_target, atol=1e-9)
