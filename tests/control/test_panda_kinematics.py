@@ -2,6 +2,8 @@ import mujoco
 import numpy as np
 
 from control.panda_kinematics import (
+    camera_pose_numpy,
+    camera_pose_symbolic,
     panda_fk_numpy,
     panda_fk_symbolic,
     panda_tcp_numpy,
@@ -161,3 +163,51 @@ def test_tcp_pose_numpy_matches_mujoco_hand_orientation():
         # Anti-parallel is fine (left/right labeling is arbitrary); only the
         # axis, not the sign, matters for the lateral-offset cost.
         assert abs(abs(np.dot(closing_dir_world, local_y)) - 1.0) < 1e-4
+
+
+def test_casadi_camera_pose_matches_independent_numpy_camera_pose():
+    pose_fn = camera_pose_symbolic()
+    rng = np.random.default_rng(23)
+    for q in [np.zeros(7)] + [rng.uniform(-1.5, 1.5, size=7) for _ in range(5)]:
+        casadi_pos, casadi_fwd = pose_fn(q)
+        numpy_pos, numpy_fwd = camera_pose_numpy(q)
+        np.testing.assert_allclose(
+            np.array(casadi_pos).flatten(), numpy_pos, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            np.array(casadi_fwd).flatten(), numpy_fwd, atol=1e-6
+        )
+
+
+def test_camera_forward_is_unit_length():
+    rng = np.random.default_rng(29)
+    for q in [np.zeros(7)] + [rng.uniform(-1.5, 1.5, size=7) for _ in range(5)]:
+        _, fwd = camera_pose_numpy(q)
+        assert abs(np.linalg.norm(fwd) - 1.0) < 1e-9
+
+
+def test_camera_pose_numpy_matches_mujoco_wrist_cam():
+    """Ground-truth cross-check against the real compiled MuJoCo camera --
+    same discipline as panda_tcp_pose_numpy's hand-orientation check.
+    camera_pos must match data.cam_xpos; camera_forward (this module's
+    boresight convention) must match MuJoCo's own camera-forward
+    convention, -cam_xmat[:, 2] (a MuJoCo camera looks down its local -Z
+    axis; cam_xmat's columns are the camera's local axes in world frame)."""
+    env = ConveyorSceneEnv(conveyor_velocity=np.array([0.0, 0.08, 0.0]))
+    env.reset()
+    cam_id = env.model.camera("wrist_cam").id
+
+    configs = [np.zeros(7), env.get_joint_positions().copy()]
+    rng = np.random.default_rng(31)
+    configs += [rng.uniform(-1.2, 1.2, size=7) for _ in range(5)]
+
+    for q in configs:
+        env.data.qpos[:7] = q
+        mujoco.mj_forward(env.model, env.data)
+        mj_cam_pos = env.data.cam_xpos[cam_id].copy()
+        mj_cam_mat = env.data.cam_xmat[cam_id].reshape(3, 3).copy()
+        mj_cam_forward = -mj_cam_mat[:, 2]
+
+        cam_pos, cam_forward = camera_pose_numpy(q)
+        np.testing.assert_allclose(cam_pos, mj_cam_pos, atol=1e-6)
+        np.testing.assert_allclose(cam_forward, mj_cam_forward, atol=1e-6)
