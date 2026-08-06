@@ -83,20 +83,35 @@ class KinematicMPC:
         near the TCP in aggregate distance.
 
         ``camera_fk_func``/``look_at_weight`` (#36 -- additive and
-        backward-compatible: `None`/0.0 keeps the original behavior):
-        measured directly (see the Round 7 look-at MPC cost design spec),
-        the wrist camera loses the tracked object the instant GOTO starts
-        moving the arm, well before the object is actually out of range --
-        because the position-only Cartesian cost leaves the wrist's
-        orientation nullspace free to rotate the camera away from the
-        object with no penalty for doing so. `camera_fk_func` (e.g.
-        `camera_pose_symbolic()`) supplies the camera's world position and
-        boresight direction; when `look_at_weight > 0.0`, an extra cost
-        term penalizes `1 - cos(angle)` between the boresight and the
-        direction to `look_at_target` (a new `.solve()` parameter,
-        typically the object's live tracked position) at every horizon
-        step, biasing the solver toward wrist orientations that keep the
-        object in view while still reaching the position target.
+        backward-compatible: `None`/0.0 keeps the original behavior): as
+        measured directly (see
+        `docs/superpowers/specs/2026-08-06-look-at-mpc-cost-design.md`), the
+        wrist camera loses the tracked object the instant GOTO starts moving
+        the arm, well before the object is actually out of range -- because
+        the position-only Cartesian cost leaves the wrist's orientation
+        nullspace free to rotate the camera away from the object with no
+        penalty for doing so. `camera_fk_func` (e.g. `camera_pose_symbolic()`)
+        supplies the camera's world position and boresight direction; when
+        `look_at_weight > 0.0`, an extra cost term penalizes `1 -
+        cos(angle)` between the boresight and the direction to
+        `look_at_target` (a new `.solve()` parameter, typically the object's
+        live tracked position) at every horizon step, biasing the solver
+        toward wrist orientations that keep the object in view while still
+        reaching the position target.
+
+        The look-at term's *weight* is itself a CasADi parameter
+        (`_look_at_weight_param`), not a value baked into the cost graph at
+        construction time, so it can be toggled per `.solve()` call: a call
+        that omits `look_at_target` sets this parameter to `0.0` for that
+        call, leaving the term structurally present in the graph but
+        contributing zero cost, regardless of the constructor's configured
+        `look_at_weight`. This matters because `look_at_weight` is otherwise
+        a constructor-level (i.e. shared across every call on an instance)
+        setting -- without this, a caller with multiple call sites sharing
+        one `KinematicMPC` instance (e.g. `run_conveyor_demo.py`'s GOTO and
+        LIFT phases) could not selectively enable the term for only some of
+        those call sites once `look_at_weight > 0.0`. See `.solve()`'s
+        docstring for the per-call semantics.
         """
         self.horizon = horizon
         self.dt = dt
@@ -108,6 +123,7 @@ class KinematicMPC:
         q0_param = opti.parameter(self.n_joints)
         target_param = opti.parameter(3)
         look_at_target_param = opti.parameter(3)
+        look_at_weight_param = opti.parameter(1)
 
         opti.subject_to(Q[:, 0] == q0_param)
         cost = 0
@@ -137,7 +153,7 @@ class KinematicMPC:
                 # position, but cheap to guard against).
                 direction_norm = ca.sqrt(ca.sumsqr(direction) + 1e-9)
                 cos_angle = ca.dot(cam_forward, direction) / direction_norm
-                cost += look_at_weight * (1.0 - cos_angle)
+                cost += look_at_weight_param * (1.0 - cos_angle)
 
         opti.minimize(cost)
         # print_level=0 + sb="yes" suppresses IPOPT's banner/iteration log;
@@ -150,7 +166,9 @@ class KinematicMPC:
         self._q0_param = q0_param
         self._target_param = target_param
         self._look_at_target_param = look_at_target_param
+        self._look_at_weight_param = look_at_weight_param
         self._look_at_active = camera_fk_func is not None and look_at_weight > 0.0
+        self._configured_look_at_weight = look_at_weight
         # Warm-start memory across .solve() calls -- see solve()'s docstring
         # for why this matters for a receding-horizon controller called
         # repeatedly against a moving target.
@@ -185,14 +203,34 @@ class KinematicMPC:
         so keeps consecutive solves in the same local-minimum basin and
         removed the oscillation in practice. The first call (no previous
         solution yet) falls back to the original tile/zero scheme.
+
+        ``look_at_target`` (#36): only meaningful when this instance was
+        constructed with `camera_fk_func` and `look_at_weight > 0.0`.
+        Omitting it on a given call disables the look-at term for *that
+        call only* (its weight is set to `0.0` for this solve), even though
+        the term remains structurally present in the cost graph and other
+        calls on the same instance may pass `look_at_target`. This lets one
+        `KinematicMPC` instance be shared across call sites that do and
+        don't want the look-at behavior -- e.g. `run_conveyor_demo.py`
+        passes `look_at_target` only during GOTO, and omits it during LIFT,
+        so LIFT is unaffected by `look_at_weight` no matter its configured
+        value.
         """
         self._opti.set_value(self._q0_param, q_current)
         self._opti.set_value(self._target_param, target_pos)
         if self._look_at_active:
-            self._opti.set_value(
-                self._look_at_target_param,
-                target_pos if look_at_target is None else look_at_target,
-            )
+            if look_at_target is None:
+                # Term stays in the graph but contributes zero cost this
+                # call. The target value is irrelevant when multiplied by a
+                # zero weight; set it to target_pos purely for hygiene, so
+                # no stale/uninitialized value lingers in the parameter.
+                self._opti.set_value(self._look_at_weight_param, 0.0)
+                self._opti.set_value(self._look_at_target_param, target_pos)
+            else:
+                self._opti.set_value(
+                    self._look_at_weight_param, self._configured_look_at_weight
+                )
+                self._opti.set_value(self._look_at_target_param, look_at_target)
 
         if self._prev_Q_sol is None:
             q_init = np.tile(q_current.reshape(-1, 1), (1, self.horizon + 1))

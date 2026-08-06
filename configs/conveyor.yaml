@@ -91,9 +91,12 @@ mpc:
   #   0.05 -> first_blind_step 2350 (no change)
   #   5.0, 50.0, 200.0 -> first_blind_step 2350-2375 (still <10% later than
   #            baseline)
-  # The weight range that meaningfully delays blindness (>=5) is ~1000x the
-  # range that keeps the episode intact (<=0.001) -- these two ranges do not
-  # overlap. The term is wired in (run_conveyor_demo.py passes
+  # No weight tested produced a meaningful delay -- the best case (10.0)
+  # only moved first_blind_step by ~7% over baseline, while breaking
+  # contact_verified at every speed. The range that even barely moves
+  # first_blind_step (>=5) is ~1000x the range that keeps the episode intact
+  # (<=0.001) -- these two ranges do not overlap. The term is wired in
+  # (run_conveyor_demo.py passes
   # look_at_target=obj_est during GOTO) but left inert until a future
   # attempt (e.g. a second cost term or re-tuned rendezvous timing) closes
   # that gap. See task-3-report.md for the full per-weight table.

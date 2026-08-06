@@ -310,11 +310,14 @@ def test_look_at_weight_biases_solution_toward_facing_the_target():
     assert angular_deviation(qdot_on) < angular_deviation(qdot_off)
 
 
-def test_solve_without_look_at_target_falls_back_to_position_target():
-    """Constructed with look_at_weight > 0 but called without
-    look_at_target -- must not raise, and must fall back to using
-    target_pos as the look-at target (verified by equivalence with an
-    explicit call passing target_pos as look_at_target)."""
+def test_solve_without_look_at_target_disables_the_term_for_that_call():
+    """Omitting look_at_target on a given .solve() call must disable the
+    look-at term for that call only, regardless of the instance's
+    configured look_at_weight -- not fall back to using target_pos as the
+    look-at target. Verified by equivalence: a call without look_at_target
+    on an instance constructed with look_at_weight > 0.0 must produce the
+    exact same qdot as a call (also without look_at_target) on an
+    otherwise-identical instance constructed with look_at_weight = 0.0."""
     fk = panda_tcp_symbolic()
     camera_fk = camera_pose_symbolic()
     q_min = np.full(7, -2.8)
@@ -323,16 +326,20 @@ def test_solve_without_look_at_target_falls_back_to_position_target():
     q0 = np.zeros(7)
     target = np.array([0.4, 0.1, 0.4])
 
-    mpc = KinematicMPC(
-        fk_func=fk,
-        horizon=5,
-        dt=0.05,
-        q_min=q_min,
-        q_max=q_max,
-        qdot_max=qdot_max,
-        camera_fk_func=camera_fk,
-        look_at_weight=10.0,
+    common = {
+        "fk_func": fk,
+        "horizon": 5,
+        "dt": 0.05,
+        "q_min": q_min,
+        "q_max": q_max,
+        "qdot_max": qdot_max,
+        "camera_fk_func": camera_fk,
+    }
+    mpc_active = KinematicMPC(**common, look_at_weight=10.0)
+    mpc_inert = KinematicMPC(**common, look_at_weight=0.0)
+
+    qdot_active_no_target = mpc_active.solve(q0, target)
+    qdot_inert_no_target = mpc_inert.solve(q0, target)
+    np.testing.assert_allclose(
+        qdot_active_no_target, qdot_inert_no_target, atol=1e-9
     )
-    qdot_implicit = mpc.solve(q0, target)
-    qdot_explicit = mpc.solve(q0, target, look_at_target=target)
-    np.testing.assert_allclose(qdot_implicit, qdot_explicit, atol=1e-9)
