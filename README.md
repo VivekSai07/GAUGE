@@ -38,13 +38,13 @@ acados.
 ## Demonstrated result
 
 The Franka reaches, targets, closes on the cube, and lifts it ~10cm — and
-the grasp survives the lift. A fresh full run reports `{'grasped': True,
-'grasp_error_m': 0.0135, 'contact_verified': True, 'object_height_gain_m':
-0.0893, 'object_peak_height_gain_m': 0.0897}`, with the full test suite at
-57/57. `contact_verified` is checked *after* the lift, not at the instant
-the gripper closes, so this is a real hold, not momentary contact — the
-first one this project has produced. This is a recent result (Round 6,
-below) and comes with a real, stated limitation of its own — see below.
+the grasp survives the lift, at every conveyor speed tested. A fresh full
+run reports `{'grasped': True, 'grasp_error_m': 0.0100, 'contact_verified':
+True, 'object_height_gain_m': 0.0885, 'object_peak_height_gain_m':
+0.0891}`, with the full test suite at 57/57. `contact_verified` is checked
+*after* the lift, not at the instant the gripper closes, so this is a real
+hold, not momentary contact. This is a recent result (Round 7, below) and
+comes with a real, stated limitation of its own — see below.
 
 Getting here took four rounds of real fixes, not tuning. Rounds 1-3: the
 conveyor object had to become a genuinely physically-simulated body (not a
@@ -105,15 +105,35 @@ project has produced. Full evidence, including the error-budget
 decomposition and the phase-by-phase design, is in
 [the rendezvous design spec](docs/superpowers/specs/2026-08-04-rendezvous-grasp-design.md).
 
-This comes with a real limitation, stated plainly rather than buried: the
+This came with a real limitation, stated plainly rather than buried: the
 wrist camera sees nothing during the final wait (0% detection rate once
 border-clipped detections are correctly rejected), so the close trigger runs
 on pure dead-reckoning from the last good measurement, not live perception.
-That works at 4 of the 6 conveyor speeds tested (0.06/0.08/0.10/0.12 m/s
-pass; 0.04/0.05 m/s fail) — a sensing-coverage gap, not a tuning one. The
-project's configured speed (0.08 m/s commanded) is one of the passing ones;
-note that these are *commanded* belt speeds, and the object's actual
-measured speed at the 0.08 setting is closer to **0.062 m/s**.
+Round 6 measured this passing at 4 of 6 conveyor speeds tested
+(0.06/0.08/0.10/0.12 m/s pass; 0.04/0.05 m/s fail) — a sensing-coverage gap,
+not a tuning one.
+
+Round 7 found two further, unrelated problems while chasing
+[#27](https://github.com/VivekSai07/GAUGE/issues/27) (the conveyor cube tips
+up to 77° during travel — worse than originally reported, since rendezvous
+takes longer than the pursuit approach it replaced). The cube's drive
+actuators pushed through its center of mass, creating a tipping torque
+against the platform's friction; the fix drives it from its base instead,
+co-locating the drive force with the friction reaction that opposes it
+(77.03° → 0.17° tilt, no friction values changed). Verifying that fix
+end-to-end then surfaced a second, previously-masked bug: the grasp's CLOSE
+trigger measured crossing along the *gripper's* closing axis, which happens
+to point mostly along world-X at commit posture, while the object travels
+along Y — a near-orthogonal, low-signal projection that the tipping bug's
+drag had accidentally kept working. Projecting onto the object's own travel
+direction instead fixed it, and as a side effect resolved the two
+previously-failing speeds: **all 6 tested speeds** (0.04–0.12 m/s) now pass
+`contact_verified: True`, with `grasp_error_m` between 0.0084 and 0.0119.
+The wrist camera is still blind during WAIT — that part of
+[#36](https://github.com/VivekSai07/GAUGE/issues/36) remains open — but it
+no longer causes grasp failures at any previously-tested speed. Full
+evidence in
+[the Round 7 design spec](docs/superpowers/specs/2026-08-05-cube-tilt-and-close-trigger-fix-design.md).
 
 ## How it works
 

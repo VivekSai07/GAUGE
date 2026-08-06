@@ -30,6 +30,7 @@ A number from one is never presented as evidence for the other below.
 | 3 | [Round 3: Physical Grasp Debugging](https://github.com/VivekSai07/GAUGE/milestone/4) | Orientation-aware MPC cost term (penalizes offset along the gripper's non-correctable local X axis) ([#10](https://github.com/VivekSai07/GAUGE/issues/10)); real contact check via MuJoCo's own contact array (both fingers simultaneously, not inferred from distance) | 4.4cm → 3.9cm, `contact_verified: True`* |
 | 5 | YOLO Perception Integration | Color-threshold `segment_object_centroid` swapped for the validated YOLO-detected-box + color-gated-depth `yolo_centroid` at the real pipeline's single perception call site — see [design spec, Round 5](superpowers/specs/2026-07-29-dynamic-object-tracking-manipulation-design.md#round-5-better-perception-alone-did-not-close-the-gap) | 3.9cm → 3.77cm, `contact_verified: False` (unchanged) |
 | 6 | Rendezvous Grasp | Pursuit (chase the live estimate, commit on proximity) replaced with rendezvous (park ahead of the object on its path, settle, close as it arrives), after an error-budget decomposition found the arm — not perception — responsible for 82% of the closing-axis error; plus three perception-geometry fixes (border-clipped detections rejected as misses, top-face centroid, world-Z height offset) — see [design spec](superpowers/specs/2026-08-04-rendezvous-grasp-design.md) | 3.77cm → **1.35cm**, `contact_verified: True` — first lift-surviving grasp |
+| 7 | Round 7: Cube Tilt + Trigger Robustness | Conveyor object's drive force moved from center-of-mass to base actuation, removing a tipping torque against platform friction ([#27](https://github.com/VivekSai07/GAUGE/issues/27)); CLOSE trigger's crossing check changed to project onto the object's own travel direction instead of the gripper's closing axis — the latter was found, while verifying the tilt fix, to have been accidentally masked by the tipping bug all along — see [design spec](superpowers/specs/2026-08-05-cube-tilt-and-close-trigger-fix-design.md) | 1.35cm → **1.00cm** at the configured speed; **all 6** previously-tested speeds (0.04–0.12 m/s) now pass `contact_verified: True`, vs. 4/6 before |
 
 \* Round 3's `contact_verified: True` was checked immediately after the
 gripper closed — proving momentary contact, not a real hold. Round 4
@@ -180,26 +181,79 @@ produced that survives a real lift.
 **Known limitation, stated in the same breath, not buried:** the wrist
 camera sees nothing during the final WAIT (0% detection rate once
 border-clipped detections are correctly rejected), so the close trigger
-runs on pure dead-reckoning, not live perception. This currently passes at
-4 of 6 tested conveyor speeds (0.06/0.08/0.10/0.12 m/s pass; 0.04/0.05 m/s
-fail) — a sensing-coverage gap, not a tuning one. The project's configured
-speed (0.08 m/s) is one of the passing ones; note these are *commanded*
-belt speeds — the object's actual measured speed at the 0.08 setting is
-closer to ~0.062 m/s.
+runs on pure dead-reckoning, not live perception. As shipped in Round 6
+this passed at 4 of 6 tested conveyor speeds (0.06/0.08/0.10/0.12 m/s pass;
+0.04/0.05 m/s fail) — a sensing-coverage gap, not a tuning one. Round 7
+(below) resolved the practical impact of this gap without removing the gap
+itself.
+
+## Round 7: cube tilt fix, and a second bug it uncovered
+
+Full writeup: [design spec](superpowers/specs/2026-08-05-cube-tilt-and-close-trigger-fix-design.md).
+
+[#27](https://github.com/VivekSai07/GAUGE/issues/27) tracked the conveyor
+cube tipping over during travel — reproduced on `main` at 77.03° by grasp
+time (worse than the ~32° originally reported, since rendezvous takes
+longer than the pursuit approach it replaced). Root cause: the object's
+free-joint velocity actuators pushed through its geometric center (also its
+center of mass), while the platform's friction reaction acted 2cm below at
+the base — every tick of drive force created a tipping couple.
+
+Two fixes were evaluated. Decoupling cube-platform contact friction via a
+MuJoCo `<pair>` element eliminated tilt in isolation (0.00–0.05° across
+several friction values) but broke the grasp in the full closed-loop
+episode at *every* value tried (`contact_verified: False`) — lower
+friction let the cube travel measurably farther for the same drive force,
+shifting its arrival timing enough to miss the rendezvous logic tuned
+against the old dynamics. Rejected. The shipped fix instead moves the
+joint/body-frame origin to the cube's **base**, offsetting the geom within
+the body frame so its world position and mass/inertia are unchanged — this
+co-locates the drive force with the friction reaction that opposes it,
+removing the moment arm at its source rather than blunting its effect.
+Result: 77.03° → **0.17°**, with no friction values changed.
+
+Verifying that fix end-to-end (not just tilt in isolation) initially still
+failed the grasp (`contact_verified: False`, TCP 4.3cm ahead of the
+object). Tracing it found a second, independent bug: the CLOSE trigger's
+crossing check projected onto the gripper's closing axis, which points
+mostly along world-X (~0.93) at commit posture while the object travels
+almost entirely along Y — a near-orthogonal, low-signal projection. The
+old tipping dynamics happened to keep this working by coincidence; the
+corrected dynamics exposed it. Fixed by projecting onto the object's own
+travel direction instead.
+
+| Metric | Round 6 | base-drive fix only | + travel-axis trigger fix |
+|---|---|---|---|
+| tilt at grasp time | 77.03° | 0.17° | 0.17° |
+| `grasp_error_m` | 0.0135 | 0.0443 | **0.0100** |
+| `contact_verified` | True | False | **True** |
+
+6-speed sweep with both fixes applied — **all 6 pass**, up from 4 of 6:
+
+| speed (m/s) | 0.04 | 0.05 | 0.06 | 0.08 | 0.10 | 0.12 |
+|---|---|---|---|---|---|---|
+| `grasp_error_m` | 0.0105 | 0.0102 | 0.0101 | 0.0100 | 0.0119 | 0.0084 |
+| `contact_verified` | True | True | True | True | True | True |
+
+The wrist camera's blind WAIT window (0% detection) is unchanged — this
+round didn't touch sensing coverage, only what the trigger does with the
+coverage it has. [#36](https://github.com/VivekSai07/GAUGE/issues/36)
+stays open, re-scoped to reflect that its observed grasp-failure impact is
+resolved, not its underlying cause.
 
 ## Engineering metrics
 
 - **Tests:** 57 total, 57 passing. The Round 4 grasp-lift limitation that
   previously kept one test failing by design is resolved as of Round 6.
-- **GitHub issues:** 22 closed with a verified fix, 3 open on purpose
-  ([#13](https://github.com/VivekSai07/GAUGE/issues/13) — grasp doesn't
-  yet survive a lift; [#27](https://github.com/VivekSai07/GAUGE/issues/27)
-  — a ~32° cube-tilt physics artifact in the main scene, already fixed
-  once in an isolated experiment, not yet ported; [#32](https://github.com/VivekSai07/GAUGE/issues/32)
-  — this session's tail-error finding).
-- **Milestones:** 5, each grouping a coherent round of work — MVP,
+- **GitHub issues:** 26 closed with a verified fix, 1 open on purpose
+  ([#36](https://github.com/VivekSai07/GAUGE/issues/36) — wrist camera
+  blind during the final approach; re-scoped in Round 7 to reflect that
+  its observed grasp-failure impact is resolved, its underlying sensing
+  gap is not).
+- **Milestones:** 6, each grouping a coherent round of work — MVP,
   Accuracy Improvements, Developer Experience & CI/CD, Round 3 (Physical
-  Grasp Debugging), YOLO Detector Precision Validation.
+  Grasp Debugging), YOLO Detector Precision Validation, Round 6
+  (Rendezvous Grasp).
 - **CI:** pytest across a Python 3.11/3.12 matrix, `ruff` lint + format
   checks, CodeQL and Dependency Review security scanning, submodule
   sparse-checkout caching.
@@ -210,20 +264,21 @@ closer to ~0.062 m/s.
 Mahalanobis gating, m/n track confirmation, closed-form interception,
 kinematic MPC — runs reliably in real time. Grasp verification is honest:
 a mechanical contact check is no longer treated as proof of a hold. As of
-Round 6, the grasp survives a real ~10cm lift: `grasp_error_m` 0.0135,
-`contact_verified: True`, `object_peak_height_gain_m` 0.0897 — the
-targeting-precision cliff that Round 4 root-caused and Round 5's better
-perception alone couldn't clear was closed by fixing the arm's strategy
-(pursuit → rendezvous), which an error budget showed was responsible for
-82% of the closing-axis error, not perception.
+Round 7, the grasp survives a real ~10cm lift at **every** conveyor speed
+tested: `grasp_error_m` 0.0084–0.0119, `contact_verified: True` across
+0.04–0.12 m/s. The targeting-precision cliff that Round 4 root-caused and
+Round 5's better perception alone couldn't clear was closed by fixing the
+arm's strategy (pursuit → rendezvous, Round 6); Round 7 then closed the
+speed-dependent gap that remained, which turned out to be a mis-projected
+trigger axis rather than a fundamental sensing limit.
 
-**Open:** the rendezvous approach depends on dead-reckoning through a final
-approach window where the wrist camera sees nothing (0% detection rate) —
-it works because that window is short enough for the Kalman filter's
-constant-velocity assumption to hold, not because the object stays
-visible. It currently passes at 4 of 6 tested conveyor speeds
-(0.06/0.08/0.10/0.12 m/s pass; 0.04/0.05 m/s fail — the project's
-configured 0.08 m/s speed is one of the passing ones), which is a
-sensing-coverage gap rather than a tuning one. Extending coverage to the
-slower speeds, or reducing how much of the approach is blind, is the
-concrete next step.
+**Open:** the rendezvous approach still depends on dead-reckoning through a
+final approach window where the wrist camera sees nothing (0% detection
+rate) — it works because that window is short enough for the Kalman
+filter's constant-velocity assumption to hold, not because the object
+stays visible. This sensing-coverage gap ([#36](https://github.com/VivekSai07/GAUGE/issues/36))
+no longer causes grasp failures at any tested speed, but it is still the
+approach's real dependency: extending live coverage into that window, or
+reducing how much of the approach is blind, remains the concrete next
+step for making the design robust rather than merely passing at the
+speeds tested so far.
