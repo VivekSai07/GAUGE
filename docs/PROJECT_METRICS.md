@@ -241,15 +241,70 @@ coverage it has. [#36](https://github.com/VivekSai07/GAUGE/issues/36)
 stays open, re-scoped to reflect that its observed grasp-failure impact is
 resolved, not its underlying cause.
 
+## Round 8: a look-at MPC cost term — a negative result, reported honestly
+
+Full writeup: [design spec](superpowers/specs/2026-08-06-look-at-mpc-cost-design.md).
+
+Tracing #36 further found the wrist camera doesn't go blind because the
+object leaves the frame — it goes blind because the MPC's GOTO-phase cost
+function has no term keeping the camera pointed at the object at all, so
+the wrist's redundant nullspace rotates the camera away the instant GOTO
+starts moving (measured: detections die at simulation step 2350, while the
+object is still nearby). This is a self-inflicted, and in principle
+fixable, cause — not the geometric inevitability Round 6/7 assumed.
+
+**Fix attempted:** an optional `look_at_weight` cost term added to
+`KinematicMPC` (`control/mpc.py`), following the same additive/
+backward-compatible pattern as the existing `lateral_axis_weight` term —
+penalizes the tracked object's angular deviation from the camera's
+boresight during GOTO only.
+
+**Result: no weight tested helps without breaking the grasp.** A sweep of
+14 weights (0.001–200), each checked against the full 6-speed suite, found
+the weight range that meaningfully delays blindness and the weight range
+that keeps `contact_verified: True` across all 6 speeds don't overlap by
+roughly 1000x:
+
+| `look_at_weight` | `first_blind_step` (2350 = baseline) | `contact_verified` (6 speeds) |
+|---|---|---|
+| 0.001 | 2350 (no change) | 6/6 True |
+| 0.005 – 0.01 | 2350 (no change) | 0/6 True — already broken, zero benefit |
+| 1.0 – 2.0 | 2375–2400 (barely moved) | 1/6 True |
+| 10.0 (best delay found) | 2525 (~7% later) | 0/6 True, `grasp_error_m` 3–8× baseline |
+
+No weight tested produced a meaningful delay in camera blindness — the
+best case (10.0) moved timing by only ~7% while breaking the grasp at
+every speed. `look_at_weight` ships wired in but **inert**
+(`0.0` in `configs/conveyor.yaml`), matching how other optional cost terms
+in this codebase can exist without being force-enabled.
+
+**Why:** even a small look-at cost measurably perturbs the MPC's terminal
+wrist pose at the rendezvous point, which throws off WAIT's travel-axis
+close-trigger timing (tuned to a tight tolerance — see the Round 6/7
+history of `position_tolerance` re-sweeps) well before the weight is large
+enough to meaningfully change how long the camera keeps the object in
+frame. A competing cost term inside the same QP isn't the right mechanism
+for this; a fundamentally different approach (a second camera, or
+re-tuning WAIT's timing to be less sensitive to terminal-pose
+perturbation) would need to come first.
+
+This is reported as a real result, not omitted or downgraded to "future
+work" — the branch that shipped it (57 → 63 tests, three reviewed tasks
+plus a final whole-branch review that caught and fixed a real bug in the
+look-at fallback's call-site scoping) is exactly as rigorous as every
+positive round in this log.
+
 ## Engineering metrics
 
-- **Tests:** 57 total, 57 passing. The Round 4 grasp-lift limitation that
-  previously kept one test failing by design is resolved as of Round 6.
+- **Tests:** 63 total, 63 passing (57 through Round 7, +6 for Round 8's
+  camera-pose FK and look-at cost term tests). The Round 4 grasp-lift
+  limitation that previously kept one test failing by design is resolved
+  as of Round 6.
 - **GitHub issues:** 26 closed with a verified fix, 1 open on purpose
   ([#36](https://github.com/VivekSai07/GAUGE/issues/36) — wrist camera
   blind during the final approach; re-scoped in Round 7 to reflect that
-  its observed grasp-failure impact is resolved, its underlying sensing
-  gap is not).
+  its observed grasp-failure impact is resolved; Round 8 investigated and
+  ruled out one fix mechanism, root cause still open).
 - **Milestones:** 6, each grouping a coherent round of work — MVP,
   Accuracy Improvements, Developer Experience & CI/CD, Round 3 (Physical
   Grasp Debugging), YOLO Detector Precision Validation, Round 6
@@ -278,7 +333,14 @@ rate) — it works because that window is short enough for the Kalman
 filter's constant-velocity assumption to hold, not because the object
 stays visible. This sensing-coverage gap ([#36](https://github.com/VivekSai07/GAUGE/issues/36))
 no longer causes grasp failures at any tested speed, but it is still the
-approach's real dependency: extending live coverage into that window, or
-reducing how much of the approach is blind, remains the concrete next
-step for making the design robust rather than merely passing at the
-speeds tested so far.
+approach's real dependency. Round 8 traced the blindness to a specific,
+fixable-in-principle cause (the MPC's GOTO cost function never asked to
+keep the camera pointed at the object) and tried the direct fix — an
+MPC cost term — but found it structurally can't be tuned safely: any
+weight large enough to help perturbs the wrist's terminal pose enough to
+break WAIT's tightly-tuned close trigger. Extending live coverage into
+that window now looks like it needs a mechanism that doesn't compete
+inside the same QP as the position/lateral/terminal costs — e.g. a second,
+static camera, or a WAIT-phase timing re-tune that's less sensitive to
+terminal-pose perturbation — either of which is a larger, separate design,
+not a tuning knob.

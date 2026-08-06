@@ -41,7 +41,7 @@ The Franka reaches, targets, closes on the cube, and lifts it ~10cm — and
 the grasp survives the lift, at every conveyor speed tested. A fresh full
 run reports `{'grasped': True, 'grasp_error_m': 0.0100, 'contact_verified':
 True, 'object_height_gain_m': 0.0885, 'object_peak_height_gain_m':
-0.0891}`, with the full test suite at 57/57. `contact_verified` is checked
+0.0891}`, with the full test suite at 63/63. `contact_verified` is checked
 *after* the lift, not at the instant the gripper closes, so this is a real
 hold, not momentary contact. This is a recent result (Round 7, below) and
 comes with a real, stated limitation of its own — see below.
@@ -134,6 +134,25 @@ The wrist camera is still blind during WAIT — that part of
 no longer causes grasp failures at any previously-tested speed. Full
 evidence in
 [the Round 7 design spec](docs/superpowers/specs/2026-08-05-cube-tilt-and-close-trigger-fix-design.md).
+
+Round 8 traced *why* the camera goes blind: not because the object leaves
+the frame, but because the MPC's GOTO-phase cost function never asked to
+keep the camera pointed at it, so the wrist's redundant nullspace rotates
+the camera away the instant GOTO starts moving (detections measured dying
+at simulation step 2350, while the object is still nearby). An optional
+look-at MPC cost term was added to fix this directly — and a 14-value
+weight sweep across all 6 speeds found **no weight that helps without
+breaking the grasp**: the range that meaningfully delays blindness and the
+range that keeps `contact_verified: True` don't overlap by roughly 1000x,
+because even a small look-at weight perturbs the wrist's terminal pose
+enough to throw off WAIT's tightly-tuned close trigger. The feature ships
+wired in but inert (`look_at_weight: 0.0`), and this negative result is
+reported plainly rather than hidden — see
+[the Round 8 design spec](docs/superpowers/specs/2026-08-06-look-at-mpc-cost-design.md)
+for the full sweep. Closing #36 for real now looks like it needs a
+mechanism that doesn't compete inside the same MPC cost function — e.g. a
+second, static camera, or a WAIT-phase re-tune less sensitive to
+terminal-pose perturbation.
 
 ## How it works
 
